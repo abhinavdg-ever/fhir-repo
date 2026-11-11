@@ -1,0 +1,11 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+pydantic==2.*
+httpx==0.27.*
+openai==1.*
+python-dotenv==1.*
+# Optional: only needed for Entra ID (az login / managed identity) instead of an API key
+# azure-identity==1.*
+
+# Tests
+pytest==8.*
