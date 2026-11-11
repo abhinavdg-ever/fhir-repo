@@ -17,6 +17,35 @@ export const api = {
   },
   run: (payload) => call("/api/run", { method: "POST", body: JSON.stringify(payload) }),
 
+  // Stream /api/run/stream (NDJSON) and call onEvent for each progress event.
+  runStream: async (payload, onEvent) => {
+    const res = await fetch("/api/run/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === "error") throw new Error(event.detail);
+        onEvent(event);
+      }
+      if (done) break;
+    }
+  },
+
   binaryUrl: (doc) => {
     const q = new URLSearchParams({ url: doc.binaryUrl, name: doc.file || doc.id });
     if (doc.contentType) q.set("type", doc.contentType);

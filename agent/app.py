@@ -5,6 +5,7 @@
   POST /api/plan       service note -> LOINC plan (502 if the LLM fails)
   GET  /api/patients   find the member by name (+ optional DOB) or Patient ID
   POST /api/run        run the plan against Cerner (worker.main.handle_job)
+  POST /api/run/stream the same, as NDJSON progress events (one line per LOINC call)
   GET  /api/binary     stream one note's file from its Binary URL
   POST /api/packet     build the zip packet in memory and stream it back
 
@@ -13,6 +14,7 @@ Run from the repo root:  uvicorn agent.app:app --port 8000
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -31,7 +33,7 @@ from agent.doc_types import DOCUMENT_CODES, OBSERVATION_CODES  # noqa: E402
 from agent.planner import LlmError, llm_configured, llm_settings, make_plan  # noqa: E402
 from common.models import PacketRequest, Plan, PlanRequest, RunRequest  # noqa: E402
 from worker.fhir_client import FhirClient, FhirError, patient_summary  # noqa: E402
-from worker.main import binary_allowed, build_packet, handle_job, safe  # noqa: E402
+from worker.main import CONCURRENCY, binary_allowed, build_packet, handle_job, run_job_events, safe  # noqa: E402
 
 FHIR_BASE = os.getenv("FHIR_BASE", "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d")
 FHIR_TOKEN = os.getenv("FHIR_BEARER_TOKEN") or None
@@ -50,7 +52,8 @@ def health():
     on = llm_configured()
     s = llm_settings()
     return {"fhirBase": FHIR_BASE, "llm": on, "llmDeployment": s["deployment"] if on else None,
-            "llmTemperature": s["temperature"] if on else None}
+            "llmTemperature": s["temperature"] if on else None,
+            "fhirMaxRps": float(os.getenv("FHIR_MAX_RPS", "3") or 0), "fhirConcurrency": CONCURRENCY}
 
 
 @app.get("/api/catalog")
@@ -98,6 +101,22 @@ async def run(req: RunRequest):
         raise HTTPException(502, str(e))
     finally:
         await c.close()
+
+
+@app.post("/api/run/stream")
+async def run_stream(req: RunRequest):
+    async def events():
+        c = client()
+        try:
+            async for event in run_job_events(c, req):
+                yield json.dumps(event) + "\n"
+        except FhirError as e:
+            yield json.dumps({"type": "error", "detail": str(e)}) + "\n"
+        finally:
+            await c.close()
+
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/binary")

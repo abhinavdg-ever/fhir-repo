@@ -322,9 +322,68 @@ tr.missing { background: var(--bad-bg); }
 .doc a, .files a { color: var(--primary); font-weight: 500; }
 .files { margin: 0; padding-left: 1.2rem; line-height: 1.7; word-break: break-all; }
 
+/* ---------- progress ---------- */
+.progress {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.progress-head { display: flex; justify-content: space-between; font-size: 0.82rem; margin-bottom: 0.4rem; }
+.progress-bar { height: 6px; border-radius: 999px; background: var(--head-bg); overflow: hidden; border: 1px solid var(--border); }
+.progress-bar span { display: block; height: 100%; background: var(--primary); transition: width 0.3s ease; }
+.progress-codes { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.55rem; }
+
+/* ---------- tabs ---------- */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  margin-top: 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: -1px;
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+.tab:hover:not(:disabled) { color: var(--text); background: var(--head-bg); }
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+.tab-count {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--head-bg);
+  border: 1px solid var(--border);
+  color: var(--neutral-700);
+}
+.tab.active .tab-count { background: var(--brand-50); border-color: var(--brand-300); color: var(--primary); }
+.tab.missing .tab-count { background: var(--bad-bg); border-color: transparent; color: var(--bad-fg); }
+.tab.error .tab-count { background: var(--bad-bg); border-color: transparent; color: var(--bad-fg); }
+.tab-panel { padding-top: 0.8rem; }
+.tab-head { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; }
+.tab-filter { width: 18rem; max-width: 100%; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.nowrap { white-space: nowrap; }
+.banner.small { font-size: 0.78rem; margin-bottom: 0.5rem; word-break: break-word; }
+.tab-panel .banner { margin-bottom: 0.6rem; }
+
 @media (max-width: 640px) {
   .page { padding: 0.85rem 1rem 2rem; }
   .card { padding: 0.85rem; }
   .topbar { padding: 0.6rem 1rem; }
   .plan-block select { min-width: 0; width: 100%; }
+  .tab-filter { width: 100%; }
 }

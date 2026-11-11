@@ -2,20 +2,89 @@
 
 Works against the open sandbox (no auth) or a secured tenant with a bearer
 token. Swap in SMART backend-services auth for production.
+
+All requests share one rate limiter (FHIR_MAX_RPS) and are retried on
+429 / 502 / 503 / 504 and on timeouts / dropped connections (FHIR_MAX_RETRIES), honouring
+Retry-After when the server sends it. FHIR_TIMEOUT sets seconds per request.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import os
+import random
+import time
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
 import httpx
 
 FHIR_JSON = "application/fhir+json"
 LOINC = "http://loinc.org"
+RETRY_STATUSES = {429, 502, 503, 504}  # throttled or a gateway hiccup
+MAX_RETRY_WAIT = 30.0  # seconds; never sleep longer than this on one retry
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+class RateLimiter:
+    """Spaces requests at least 1/rps seconds apart, across every client in this process."""
+
+    def __init__(self):
+        self._lock: asyncio.Lock | None = None
+        self._loop = None
+        self._next = 0.0
+
+    async def wait(self, rps: float) -> None:
+        if rps <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._loop is not loop:  # one lock per event loop
+            self._lock, self._loop = asyncio.Lock(), loop
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._next - now
+            self._next = max(now, self._next) + 1.0 / rps
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+LIMITER = RateLimiter()
+
+
+def retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+    """Server's Retry-After (seconds or HTTP date) if given, else 1, 2, 4, 8… plus jitter."""
+    header = response.headers.get("Retry-After", "").strip()
+    wait = None
+    if header:
+        try:
+            wait = float(header)
+        except ValueError:
+            try:
+                wait = parsedate_to_datetime(header).timestamp() - time.time()
+            except (TypeError, ValueError):
+                wait = None
+    if wait is None or wait < 0:
+        wait = 2 ** attempt + random.uniform(0, 0.5)
+    return min(wait, MAX_RETRY_WAIT)
+
+
+class SearchResults(list):
+    """A list of resources that remembers whether paging stopped early."""
+
+    def __init__(self, items=(), truncated: bool = False):
+        super().__init__(items)
+        self.truncated = truncated
 
 
 class FhirClient:
-    def __init__(self, base: str, token: str | None = None, timeout: float = 45.0):
+    def __init__(self, base: str, token: str | None = None, timeout: float | None = None):
+        timeout = timeout or _env_float("FHIR_TIMEOUT", 60)
         self.base = base.rstrip("/") + "/"
         headers = {"Accept": FHIR_JSON}
         if token:
@@ -29,10 +98,23 @@ class FhirClient:
         return path if path.startswith("http") else urljoin(self.base, path)
 
     async def _get(self, url: str, **kwargs) -> httpx.Response:
-        try:
-            return await self.http.get(url, **kwargs)
-        except httpx.HTTPError as e:  # timeouts, DNS, connection resets
-            raise FhirError(0, url, f"{type(e).__name__}: {e}") from e
+        rps = _env_float("FHIR_MAX_RPS", 3)
+        retries = int(_env_float("FHIR_MAX_RETRIES", 4))
+        for attempt in range(retries + 1):
+            await LIMITER.wait(rps)
+            try:
+                r = await self.http.get(url, **kwargs)
+            except httpx.TransportError as e:  # timeouts, connection resets: worth another try
+                if attempt == retries:
+                    raise FhirError(0, url, f"{type(e).__name__} after {retries + 1} tries") from e
+                await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+                continue
+            except httpx.HTTPError as e:
+                raise FhirError(0, url, f"{type(e).__name__}: {e}") from e
+            if r.status_code not in RETRY_STATUSES or attempt == retries:
+                return r
+            await asyncio.sleep(retry_after_seconds(r, attempt))
+        return r
 
     async def get_json(self, path: str, params=None) -> dict:
         r = await self._get(self.url(path), params=params)
@@ -40,18 +122,24 @@ class FhirClient:
             raise FhirError(r.status_code, r.request.url, r.text[:500])
         return r.json()
 
-    async def search(self, resource: str, params: list[tuple[str, str]], max_pages: int = 10) -> list[dict]:
-        """Run a search and follow `next` links. Returns the resources."""
+    async def search(self, resource: str, params: list[tuple[str, str]], max_pages: int | None = None) -> SearchResults:
+        """Run a search and follow `next` links up to max_pages (FHIR_MAX_PAGES, default 10).
+        `.truncated` on the result is True when more pages were left unread."""
+        max_pages = max_pages or int(_env_float("FHIR_MAX_PAGES", 10))
         out: list[dict] = []
+        truncated = False
         bundle = await self.get_json(resource, params)
-        for _ in range(max_pages):
+        for page in range(max_pages):
             out += [e["resource"] for e in bundle.get("entry", []) if "resource" in e]
             nxt = next((l["url"] for l in bundle.get("link", []) if l.get("relation") == "next"), None)
             if not nxt:
                 break
+            if page == max_pages - 1:
+                truncated = True
+                break
             bundle = await self.get_json(nxt)
         # Cerner can put OperationOutcome entries in a searchset; keep only real hits
-        return [r for r in out if r.get("resourceType") == resource]
+        return SearchResults((r for r in out if r.get("resourceType") == resource), truncated=truncated)
 
     # ---- Patient ----
     async def find_patients(self, name: str, birthdate: str | None = None) -> list[dict]:
@@ -99,7 +187,7 @@ class FhirClient:
         params = [("patient", pid), ("code", ",".join(f"{LOINC}|{c}" for c in codes)), ("_count", "200")]
         if start and end:
             params += [("date", f"ge{start}"), ("date", f"lt{end}")]
-        return await self.search("Observation", params, max_pages=5)
+        return await self.search("Observation", params)
 
     # ---- Binary ----
     async def download_binary(self, url: str, content_type: str | None) -> tuple[bytes, str]:

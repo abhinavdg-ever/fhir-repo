@@ -89,10 +89,34 @@ export default function App() {
   const fetchAll = () =>
     step("Requesting each LOINC code from Cerner…", async () => {
       const sent = { ...plan, documents: checkedOnly(plan.documents), observations: checkedOnly(plan.observations) };
-      const result = await api.run({
-        patient_id: patientId, plan: sent, apply_dates: applyDates, title_fallback: titleFallback,
-      });
-      setRun({ plan: sent, result });
+      const order = sent.documents.map((d) => d.code);
+      const byPlanOrder = (rows) => [...rows].sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
+      setRun(null);
+      await api.runStream(
+        { patient_id: patientId, plan: sent, apply_dates: applyDates, title_fallback: titleFallback },
+        (ev) => {
+          if (ev.type === "start") {
+            setRun({
+              id: Date.now(),
+              plan: sent,
+              done: false,
+              progress: { codes: ev.codes, finished: [], phase: "documents", observations: ev.observations, titleSweep: ev.titleSweep },
+              result: { patient: ev.patient, window: ev.window, rows: [], observations: [], observationError: null, missing: [] },
+            });
+          } else if (ev.type === "row") {
+            setRun((r) => {
+              const finished = [...r.progress.finished, ev.row.code];
+              return { ...r, progress: { ...r.progress, finished }, result: { ...r.result, rows: byPlanOrder([...r.result.rows, ev.row]) } };
+            });
+          } else if (ev.type === "sweep") {
+            setRun((r) => ({ ...r, progress: { ...r.progress, phase: "observations" }, result: { ...r.result, rows: ev.rows } }));
+          } else if (ev.type === "observations") {
+            setRun((r) => ({ ...r, result: { ...r.result, observations: ev.observations, observationError: ev.observationError, observationsTruncated: ev.observationsTruncated } }));
+          } else if (ev.type === "done") {
+            setRun((r) => ({ ...r, done: true, progress: { ...r.progress, phase: "done" }, result: ev.result }));
+          }
+        },
+      );
     });
 
   const downloadPacket = () =>
@@ -259,7 +283,11 @@ export default function App() {
           {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply date window”.</p>}
           <p className="hint">Sandbox data is often older than the request window — untick “Apply date window” if nothing comes back.</p>
 
-          {run && <Results r={run.result} onPacket={downloadPacket} busy={!!busy} />}
+          {health?.fhirMaxRps > 0 && (
+            <p className="hint">Requests to Cerner are spaced out: at most {health.fhirMaxRps}/s, {health.fhirConcurrency} codes at a time, with automatic retry when Cerner throttles.</p>
+          )}
+
+          {run && <Results key={run.id} run={run} onPacket={downloadPacket} busy={!!busy} rps={health?.fhirMaxRps} />}
         </section>
       </main>
     </div>
@@ -295,9 +323,153 @@ function PlanTable({ title, kind, items, options, onToggle, onAdd }) {
   );
 }
 
-function Results({ r, onPacket, busy }) {
+const PAGE = 50;
+
+function Progress({ progress }) {
+  const total = progress.codes.length;
+  const done = progress.finished.length;
+  const pct = total ? Math.round((done / total) * 100) : 100;
+  return (
+    <div className="progress">
+      <div className="progress-head">
+        <span>
+          {done < total ? `Fetched ${done} of ${total} codes`
+            : progress.titleSweep && progress.phase === "documents" ? "Matching notes by title…"
+            : progress.observations ? "Fetching results (BP / HbA1c / GMI)…" : "Finishing…"}
+        </span>
+        <span className="mono">{pct}%</span>
+      </div>
+      <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <div className="progress-codes">
+        {progress.codes.map((c) => {
+          const finished = progress.finished.includes(c.code);
+          return (
+            <span key={c.code} className={`chip ${finished ? "ok" : ""}`} title={c.label}>
+              {finished ? "✓ " : ""}<span className="mono">{c.code}</span>
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function useFilter(items, text, fields) {
+  const q = text.trim().toLowerCase();
+  if (!q) return items;
+  return items.filter((it) => fields.some((f) => String(f(it) ?? "").toLowerCase().includes(q)));
+}
+
+function DocTab({ row }) {
+  const [filter, setFilter] = useState("");
+  const [shown, setShown] = useState(PAGE);
+  const docs = useFilter(row.docs, filter, [(d) => d.title, (d) => d.author, (d) => d.date, (d) => toUS(d.date)]);
+  return (
+    <div>
+      <div className="tab-head">
+        <div>
+          <b>{row.label}</b> <span className="mono muted">LOINC {row.code}</span>
+          {row.reason && <div className="hint">Why: {row.reason}</div>}
+        </div>
+        {row.docs.length > 10 && (
+          <input className="tab-filter" placeholder="Filter by title, author, date…" value={filter}
+            onChange={(e) => { setFilter(e.target.value); setShown(PAGE); }} />
+        )}
+      </div>
+      {row.error && <div className="banner error small">{row.error}</div>}
+      {row.truncated && <div className="banner warn">Showing the first {row.count}; Cerner has more. Narrow the date window or raise FHIR_MAX_PAGES in .env.</div>}
+      {!row.error && row.count === 0 && <div className="banner warn">Nothing found for this code. It is listed in missing-items.txt.</div>}
+      {docs.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Title</th><th>Author</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              {docs.slice(0, shown).map((d) => (
+                <tr key={d.id}>
+                  <td className="mono nowrap">{d.date ? toUS(d.date) : "undated"}</td>
+                  <td><b>{d.title || "(untitled)"}</b></td>
+                  <td className="muted">{d.author}</td>
+                  <td>
+                    <div className="chips">
+                      {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
+                      {d.matchedBy === "title" && <span className="chip warn">matched by title</span>}
+                      {d.duplicate && <span className="chip">also under another code</span>}
+                    </div>
+                  </td>
+                  <td className="nowrap">
+                    {d.binaryUrl ? <a href={api.binaryUrl(d)} target="_blank" rel="noreferrer">open</a> : <span className="muted small">no file</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {filter && docs.length === 0 && <p className="hint">No notes match “{filter}”.</p>}
+      <ShowMore total={docs.length} shown={shown} onMore={() => setShown(shown + PAGE)} />
+    </div>
+  );
+}
+
+function ShowMore({ total, shown, onMore }) {
+  if (total <= shown) return total > PAGE ? <p className="hint">Showing all {total}.</p> : null;
+  return (
+    <div className="row">
+      <span className="hint">Showing {shown} of {total}</span>
+      <button className="ghost" onClick={onMore}>Show {Math.min(PAGE, total - shown)} more</button>
+    </div>
+  );
+}
+
+function ResultsTab({ r }) {
+  const [shown, setShown] = useState(PAGE);
+  return (
+    <div>
+      {r.observationError && <div className="banner error small">{r.observationError}</div>}
+      {!r.observationError && r.observations.length === 0 && <div className="banner warn">No results found in this window.</div>}
+      {r.observations.length > 0 && (
+        <>
+          {r.observationsTruncated && <div className="banner warn">Showing the first {r.observations.length}; Cerner has more. Narrow the date window or raise FHIR_MAX_PAGES.</div>}
+          <p className="hint">Newest first. The top row is the latest: skip it if it was taken in the ED, during an inpatient stay or on a procedure day, and use the next one.</p>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Date</th><th>Result</th><th>Value</th><th>By</th></tr></thead>
+              <tbody>
+                {r.observations.slice(0, shown).map((o, i) => (
+                  <tr key={o.id} className={i === 0 ? "picked" : ""}>
+                    <td className="mono nowrap">{toUS(o.date)}</td><td>{o.name}</td><td><b>{o.value}</b></td><td>{o.performer}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <ShowMore total={r.observations.length} shown={shown} onMore={() => setShown(shown + PAGE)} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function Results({ run, onPacket, busy, rps }) {
+  const r = run.result;
+  const [tab, setTab] = useState("overview");
   const notes = r.rows.flatMap((row) => row.docs.filter((d) => !d.duplicate && d.binaryUrl));
   const files = ["00_biographical-sheet.txt", ...[...new Set(notes.map((d) => d.file))].sort(), "missing-items.txt"];
+  const missing = r.rows.filter((row) => row.count === 0 && !row.error).length;
+  const minutes = rps > 0 ? Math.ceil(notes.length / rps / 60) : 0;
+  const docRows = r.rows.filter((row) => row.code !== "clinical-note");
+  const sweepError = r.rows.find((row) => row.code === "clinical-note");
+  const current = docRows.find((row) => row.code === tab);
+
+  const tabs = [
+    { id: "overview", label: "Overview" },
+    ...docRows.map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count, state: row.error ? "error" : row.count ? "" : "missing" })),
+    ...(run.progress.observations ? [{ id: "results", label: "Results", count: r.observations.length, state: r.observationError ? "error" : "" }] : []),
+    { id: "packet", label: "Packet", count: run.done ? files.length : undefined },
+  ];
+
   return (
     <div className="results">
       <div className="summary">
@@ -306,74 +478,88 @@ function Results({ r, onPacket, busy }) {
           <div className="stats">
             <span className="stat"><span className="stat-value">{notes.length}</span> notes</span>
             <span className="stat-divider" />
-            <span className="stat"><span className={`stat-value ${r.missing.length ? "bad" : ""}`}>{r.missing.length}</span> codes missing</span>
+            <span className="stat"><span className={`stat-value ${missing ? "bad" : ""}`}>{missing}</span> codes missing</span>
             <span className="stat-divider" />
             <span className="stat mono">{r.window.start ? `${toUS(r.window.start)} → before ${toUS(r.window.end)}` : "no date filter"}</span>
           </div>
         </div>
-        <button className="primary" onClick={onPacket} disabled={busy}>Download packet (.zip)</button>
+        <button className="primary" onClick={onPacket} disabled={busy || !run.done}>Download packet (.zip)</button>
       </div>
 
-      <h3>Documents by LOINC call</h3>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>LOINC</th><th>What</th><th>Found</th><th>Notes</th></tr></thead>
-          <tbody>
-            {r.rows.map((row) => (
-              <tr key={row.code} className={row.count === 0 ? "missing" : ""}>
-                <td className="mono code">{row.code}</td>
-                <td>{row.label}</td>
-                <td>{row.error ? <span className="bad">error</span> : row.count || <span className="bad">missing</span>}</td>
-                <td>
-                  {row.error && <div className="bad small">{row.error}</div>}
-                  {row.docs.map((d) => (
-                    <div key={d.id + row.code} className="doc">
-                      <span className="mono">{d.date ? toUS(d.date) : "undated"}</span>
-                      <b>{d.title || "(untitled)"}</b>
-                      {d.author && <span className="muted">{d.author}</span>}
-                      {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
-                      {d.matchedBy === "title" && <span className="chip warn">matched by title</span>}
-                      {d.duplicate && <span className="chip">also under another code</span>}
-                      {d.binaryUrl ? (
-                        <a href={api.binaryUrl(d)} target="_blank" rel="noreferrer">open</a>
-                      ) : (
-                        <span className="muted small">no file</span>
-                      )}
-                    </div>
-                  ))}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {!run.done && <Progress progress={run.progress} />}
+
+      <div className="tabs" role="tablist">
+        {tabs.map((t) => (
+          <button key={t.id} role="tab" aria-selected={tab === t.id}
+            className={`tab ${tab === t.id ? "active" : ""} ${t.state || ""}`} onClick={() => setTab(t.id)}>
+            {t.label}
+            {t.count !== undefined && <span className="tab-count">{t.count}</span>}
+          </button>
+        ))}
       </div>
 
-      {(r.observations.length > 0 || r.observationError) && (
-        <>
-          <h3>Results (newest first)</h3>
-          {r.observationError && <div className="bad small">{r.observationError}</div>}
-          {r.observations.length > 0 && (
+      <div className="tab-panel" role="tabpanel">
+        {tab === "overview" && (
+          <>
+            {sweepError && <div className="banner error small">Title matching failed: {sweepError.error}</div>}
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Date</th><th>Result</th><th>Value</th><th>By</th></tr></thead>
+                <thead><tr><th>LOINC</th><th>What</th><th>Found</th><th>Latest</th></tr></thead>
                 <tbody>
-                  {r.observations.map((o, i) => (
-                    <tr key={o.id} className={i === 0 ? "picked" : ""}>
-                      <td className="mono">{toUS(o.date)}</td><td>{o.name}</td><td><b>{o.value}</b></td><td>{o.performer}</td>
+                  {run.progress.codes.map((c) => {
+                    const row = docRows.find((x) => x.code === c.code);
+                    const latest = row?.docs.map((d) => d.date).filter(Boolean).sort().pop();
+                    return (
+                      <tr key={c.code} className={`clickable ${row && row.count === 0 ? "missing" : ""}`} onClick={() => row && setTab(c.code)}>
+                        <td className="mono code">{c.code}</td>
+                        <td>{c.label}</td>
+                        <td>
+                          {!row ? <span className="muted">waiting…</span>
+                            : row.error ? <span className="bad" title={row.error}>error</span>
+                            : row.count ? (row.truncated ? <span title="More exist: raise FHIR_MAX_PAGES or narrow the date window">{row.count}+</span> : row.count)
+            : <span className="bad">missing</span>}
+                        </td>
+                        <td className="mono">{latest ? toUS(latest) : ""}</td>
+                      </tr>
+                    );
+                  })}
+                  {run.progress.observations && (
+                    <tr className="clickable" onClick={() => setTab("results")}>
+                      <td className="mono code">results</td>
+                      <td>Observations (BP / HbA1c / GMI)</td>
+                      <td>{r.observationError ? <span className="bad">error</span> : run.done || r.observations.length ? r.observations.length : <span className="muted">waiting…</span>}</td>
+                      <td className="mono">{r.observations[0] ? `${toUS(r.observations[0].date)} · ${r.observations[0].value}` : ""}</td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>
-          )}
-          <p className="hint">The top row is the latest. Skip it if it was taken in the ED, during an inpatient stay or on a procedure day, and use the next one.</p>
-        </>
-      )}
+            <p className="hint">Click a row or a tab to see its notes.</p>
+          </>
+        )}
 
-      <h3>Files in the packet</h3>
-      <ul className="files">
-        {files.map((f) => <li key={f} className="mono">{f}</li>)}
-      </ul>
+        {current && <DocTab key={current.code} row={current} />}
+
+        {tab === "results" && <ResultsTab r={r} />}
+
+        {tab === "packet" && (
+          <div>
+            {!run.done ? <p className="hint">The packet is ready once every code has been fetched.</p> : (
+              <>
+                <div className="row">
+                  <button className="primary" onClick={onPacket} disabled={busy}>Download packet (.zip)</button>
+                  <span className="hint">
+                    {files.length} files{minutes > 1 ? ` · about ${minutes} min to download at ${rps} requests/s` : ""}
+                  </span>
+                </div>
+                <ul className="files">
+                  {files.map((f) => <li key={f} className="mono">{f}</li>)}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

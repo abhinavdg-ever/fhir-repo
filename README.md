@@ -70,7 +70,17 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 - Type `12724066` in the patient box to load that test patient. A name search needs the date of birth too, as mm/dd/yyyy (e.g. `Tim Peters` + 09/15/1990). Dates in the UI and packet sheets are mm/dd/yyyy.
 - Sandbox notes are often outside the window — untick **Apply date window**.
 - Tick **Also match notes by title** to catch notes with no LOINC on `type`.
-- The open sandbox rate-limits (HTTP 429); a limited call shows as an error on its row instead of failing the run.
+- The open sandbox rate-limits (HTTP 429). Requests are spaced out and retried automatically; tune it in `.env`:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `FHIR_MAX_RPS` | `3` | requests per second to Cerner, shared by every search, page and download (`0` = no limit) |
+| `FHIR_CONCURRENCY` | `2` | LOINC searches in flight at once |
+| `FHIR_MAX_RETRIES` | `4` | retries on 429 / 502 / 503 / 504 and timeouts (honours `Retry-After`, else 1s, 2s, 4s, 8s) |
+| `FHIR_TIMEOUT` | `60` | seconds per request |
+| `FHIR_MAX_PAGES` | `10` | pages per search (100 notes each); a code that hits it shows as `1000+` |
+
+Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) and are organised into tabs: Overview, one tab per document type, Results (observations) and Packet.
 
 **Offline:** `uvicorn dev.mock_fhir:app --port 9000` and set `FHIR_BASE=http://localhost:9000/r4/mock` (search `jane` or `12724066`).
 
@@ -83,6 +93,7 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 | POST | `/api/plan` | `{service_note, use_llm}` | plan (502 on LLM error) |
 | GET | `/api/patients` | `name`, `birthdate?` | patient summaries |
 | POST | `/api/run` | `{patient_id, plan, apply_dates, title_fallback}` | rows per LOINC call, observations, missing codes |
+| POST | `/api/run/stream` | same as `/api/run` | NDJSON events: `start`, `row` (one per LOINC call), `sweep`, `observations`, `done` |
 | GET | `/api/binary` | `url, type, name` | the file, inline (Cerner Binary URLs only; others → 400) |
 | POST | `/api/packet` | `{plan, result}` | zip attachment, header `X-Download-Errors` |
 

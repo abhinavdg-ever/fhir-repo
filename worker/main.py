@@ -1,7 +1,8 @@
 """Worker: run a plan against Cerner and build the zip packet in memory.
 
-handle_job()    one DocumentReference search per LOINC code (+ optional title
-                sweep) and one Observation search -> per-code result rows
+run_job_events() one DocumentReference search per LOINC code (+ optional title
+                 sweep) and one Observation search, yielding progress as it goes
+handle_job()     the same, returning only the final result
 build_packet()  download every non-duplicate note and zip it with the
                 biographical and missing-items sheets; nothing touches disk
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import re
 import zipfile
 from datetime import datetime
@@ -18,7 +20,7 @@ from agent.doc_types import DOCUMENT_CODES
 from common.models import Plan, RunRequest
 from worker.fhir_client import FhirClient, FhirError, doc_summary, obs_summary, patient_summary
 
-CONCURRENCY = 4
+CONCURRENCY = int(os.getenv("FHIR_CONCURRENCY", "2") or 2)  # LOINC searches in flight at once
 EXT = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "html",
        "text/plain": "txt", "application/xml": "xml", "text/xml": "xml",
        "text/rtf": "rtf", "application/rtf": "rtf", "image/jpeg": "jpg", "image/png": "png",
@@ -58,33 +60,51 @@ def binary_allowed(url: str, fhir_base: str) -> bool:
 
 # ---------- the job ----------
 
-async def handle_job(c: FhirClient, req: RunRequest) -> dict:
+async def run_job_events(c: FhirClient, req: RunRequest):
+    """Run the plan and yield progress events as each LOINC call finishes.
+
+    {"type": "start", "patient", "window", "codes", "observations", "titleSweep"}
+    {"type": "row", "row"}                       one per LOINC call, in completion order
+    {"type": "sweep", "rows"}                    rows after the title-match sweep
+    {"type": "observations", "observations", "observationError"}
+    {"type": "done", "result"}                   the same dict /api/run returns
+    """
     p = req.plan
     start, end = (p.start, p.end) if req.apply_dates else (None, None)
-    sem = asyncio.Semaphore(CONCURRENCY)
     patient = patient_summary(await c.get_patient(req.patient_id))
+    yield {"type": "start", "patient": patient, "window": {"start": start, "end": end},
+           "codes": [{"code": i.code, "label": i.label} for i in p.documents],
+           "observations": bool(p.observations), "titleSweep": bool(req.title_fallback and p.documents)}
+
+    sem = asyncio.Semaphore(max(1, CONCURRENCY))
 
     async def by_code(item):
         async with sem:
             try:
                 docs = await c.documents_by_loinc(req.patient_id, item.code, start, end)
-                return item, [d for d in docs if d.get("status") != "entered-in-error"], None
+                kept = [d for d in docs if d.get("status") != "entered-in-error"]
+                return item, kept, None, getattr(docs, "truncated", False)
             except FhirError as e:
-                return item, [], str(e)
+                return item, [], str(e), False
 
     seen: set[str] = set()
-    rows = []
-    for item, docs, err in await asyncio.gather(*(by_code(i) for i in p.documents)):
+    rows_by_code: dict[str, dict] = {}
+    for next_done in asyncio.as_completed([by_code(i) for i in p.documents]):
+        item, docs, err, truncated = await next_done
         summaries = []
         for d in docs:
             s = doc_summary(d)
             s["matchedBy"] = "loinc"
-            s["duplicate"] = s["id"] in seen
+            s["duplicate"] = s["id"] in seen  # first code to finish keeps the note
             s["file"] = file_name(s, item.label)
             seen.add(s["id"])
             summaries.append(s)
-        rows.append({"code": item.code, "label": item.label, "reason": item.reason,
-                     "count": len(summaries), "error": err, "docs": summaries})
+        row = {"code": item.code, "label": item.label, "reason": item.reason,
+               "count": len(summaries), "error": err, "docs": summaries, "truncated": truncated}
+        rows_by_code[item.code] = row
+        yield {"type": "row", "row": row}
+
+    rows = [rows_by_code[i.code] for i in p.documents]  # back in plan order
 
     if req.title_fallback and rows:
         try:
@@ -104,18 +124,33 @@ async def handle_job(c: FhirClient, req: RunRequest) -> dict:
         except FhirError as e:
             rows.append({"code": "clinical-note", "label": "Title-match sweep", "reason": "",
                          "count": 0, "error": str(e), "docs": []})
+        yield {"type": "sweep", "rows": rows}
 
-    observations, obs_error = [], None
+    observations, obs_error, obs_truncated = [], None, False
     if p.observations:
         try:
             obs = await c.observations(req.patient_id, [o.code for o in p.observations], start, end)
             observations = sorted((obs_summary(o) for o in obs), key=lambda o: o["date"], reverse=True)
+            obs_truncated = getattr(obs, "truncated", False)
         except FhirError as e:
             obs_error = str(e)
+        yield {"type": "observations", "observations": observations, "observationError": obs_error,
+               "observationsTruncated": obs_truncated}
 
-    return {"patient": patient, "window": {"start": start, "end": end},
-            "rows": rows, "observations": observations, "observationError": obs_error,
-            "missing": [r["code"] for r in rows if r["count"] == 0 and not r["error"]]}
+    yield {"type": "done", "result": {
+        "patient": patient, "window": {"start": start, "end": end},
+        "rows": rows, "observations": observations, "observationError": obs_error,
+        "observationsTruncated": obs_truncated,
+        "missing": [r["code"] for r in rows if r["count"] == 0 and not r["error"]]}}
+
+
+async def handle_job(c: FhirClient, req: RunRequest) -> dict:
+    """Run the whole plan and return the final result (no progress events)."""
+    result = {}
+    async for event in run_job_events(c, req):
+        if event["type"] == "done":
+            result = event["result"]
+    return result
 
 
 # ---------- the packet ----------
@@ -139,7 +174,7 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
         if r.get("error"):
             status = f"ERROR: {r['error']}"
         elif r.get("count"):
-            status = f"{r['count']} found"
+            status = f"{r['count']} found" + (" (more exist; raise FHIR_MAX_PAGES or narrow the window)" if r.get("truncated") else "")
         else:
             status = "NOT in this record"
         lines.append(f"  {r.get('label')} (LOINC {r.get('code')}): {status}")
