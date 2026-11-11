@@ -55,7 +55,7 @@ export default function App() {
   const [patientId, setPatientId] = useState("");
   const [applyDates, setApplyDates] = useState(true);
   const [titleFallback, setTitleFallback] = useState(false);
-  const [discover, setDiscover] = useState(true); // list every other record the patient has
+  const [discover, setDiscover] = useState(false); // list every other record the patient has (off by default; on for "all records")
   const [includeOther, setIncludeOther] = useState(false); // put those in the packet too ("all records")
   const [run, setRun] = useState(null); // { id, plan as sent, result, progress, done }
   const [packet, setPacket] = useState(null); // { runId, job, state, files, counts, failed, error }
@@ -237,7 +237,7 @@ export default function App() {
     setPatientId("");
     setApplyDates(true);
     setTitleFallback(false);
-    setDiscover(true);
+    setDiscover(false);
     setIncludeOther(false);
     setRun(null);
     setPacket(null);

@@ -32,7 +32,7 @@ class RunRequest(BaseModel):
     plan: Plan
     apply_dates: bool = True       # off = no period/date params (handy on the sandbox)
     title_fallback: bool = False   # also match unmapped notes to plan codes by title (close matches count)
-    discover: bool = True          # list every other record the patient has ("Not downloaded")
+    discover: bool = False         # list every other record the patient has ("Not downloaded")
 
 
 class PacketRequest(BaseModel):
