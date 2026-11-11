@@ -125,6 +125,15 @@ def _allowed_lists() -> str:
     return f"Allowed document codes:\n{d}\nAllowed observation codes:\n{o}"
 
 
+def build_messages(note: str, today: date | None = None) -> list[dict]:
+    """The exact chat messages sent to Azure OpenAI for a service note."""
+    today = today or date.today()
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT + "\n" + _allowed_lists()},
+        {"role": "user", "content": f"Today is {today.isoformat()}.\nService note:\n{note}"},
+    ]
+
+
 def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
     """Keep only allow-listed codes, known measures and sane dates."""
     fallback_start, fallback_end = date_window(note, today)
@@ -172,10 +181,7 @@ def llm_plan(note: str, today: date | None = None) -> Plan:
     request = dict(
         model=s["deployment"],  # Azure: the deployment name
         response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT + "\n" + _allowed_lists()},
-            {"role": "user", "content": f"Today is {today.isoformat()}.\nService note:\n{note}"},
-        ],
+        messages=build_messages(note, today),
     )
     if s["temperature"] is not None:
         request["temperature"] = s["temperature"]

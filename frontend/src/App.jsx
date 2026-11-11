@@ -11,16 +11,18 @@ const SAMPLES = {
 };
 
 // Test patients that have data, per FHIR server. All made-up sandbox/mock data.
+// `name` + `dob` are verified to find the member by name search too.
 const DEMO_PATIENTS = {
   sandbox: [
-    { id: "12724066", label: "Nancy Patchtest", hint: "Full record: ~990 progress notes, H&P, consults, discharge summaries, BP. Best for TRC / All records." },
-    { id: "12742400", label: "Tim Peters", hint: "Progress notes + BP. Quick CBP demo with a small packet." },
-    { id: "12744891", label: "Wilma Smart", hint: "Progress notes + BP, born 1950. CBP demo." },
-    { id: "12744580", label: "John Smart", hint: "Progress notes, no BP: results show up as missing." },
-    { id: "12744734", label: "Kelli Peters", hint: "Almost empty record: shows the missing-items sheet." },
+    { id: "12724066", name: "Nancy Patchtest", dob: "1990-01-02", hint: "Full record: ~990 progress notes, H&P, consults, discharge summaries, BP. Best for TRC / All records." },
+    { id: "12742400", name: "Tim Peters", dob: "1990-09-15", hint: "Progress notes + BP. Quick CBP demo. By name it matches 2 members: pick the right one." },
+    { id: "12744891", name: "Wilma Smart", dob: "1950-03-20", hint: "Progress notes + BP, older member. By name it matches 7 members." },
+    { id: "12744580", name: "Smart John", dob: "1990-09-16", hint: "Progress notes, no BP: results come back missing." },
+    { id: "12752183", name: "Joe Homenick", dob: "1977-08-25", hint: "BP readings but no progress notes: document codes come back missing." },
+    { id: "12744734", name: "Kelli Peters", dob: "1964-04-04", hint: "Almost empty record: shows the missing-items sheet." },
   ],
   mock: [
-    { id: "12724066", label: "Jane Doe", hint: "Offline mock: 8 notes and 3 BP readings, all in 2026. Keep the date window on." },
+    { id: "12724066", name: "Jane Doe", dob: "1958-04-02", hint: "Offline mock: 8 notes and 3 BP readings, all in 2026. Keep the date window on." },
   ],
 };
 
@@ -51,6 +53,9 @@ export default function App() {
   const [info, setInfo] = useState("");
   const [traceOpen, setTraceOpen] = useState(true);
   const [formKey, setFormKey] = useState(0); // bumps on Start over to reset the date fields
+  const [showSuggest, setShowSuggest] = useState(true);
+  const [prompt, setPrompt] = useState(null); // shown when not null
+  const [promptError, setPromptError] = useState("");
   const runAbort = useRef(null);
 
   const packetRunning = packet?.state === "running";
@@ -223,7 +228,7 @@ export default function App() {
   const windowOk = !applyDates || (plan && plan.start && plan.end && plan.start < plan.end);
   const selected = plan ? plan.documents.filter((d) => d.on).length + plan.observations.filter((o) => o.on).length : 0;
   const demos = demoPatientsFor(health?.fhirBase);
-  const demoHint = demos.find((p) => p.id === name)?.hint;
+  const demoHint = demos.find((p) => p.id === name || (p.name === name && p.dob === dob))?.hint;
   const runPacket = packet && run && packet.runId === run.id ? packet : null;
 
   return (
@@ -281,15 +286,9 @@ export default function App() {
             <div className="field-head">
               <label htmlFor="patient">Member</label>
               {demos.length > 0 && (
-                <div className="row tight">
-                  <span className="label">Try</span>
-                  {demos.map((p) => (
-                    <button key={p.id + p.label} title={p.hint} className={`ghost ${name === p.id ? "active" : ""}`}
-                      onClick={() => { setName(p.id); setDob(""); }}>
-                      {p.label} <span className="mono muted">{p.id}</span>
-                    </button>
-                  ))}
-                </div>
+                <button className="ghost small-btn" onClick={() => setShowSuggest((v) => !v)} aria-expanded={showSuggest}>
+                  {showSuggest ? "Hide suggested members" : `Suggested members (${demos.length})`}
+                </button>
               )}
             </div>
             <div className="row wrap member-row">
@@ -305,6 +304,33 @@ export default function App() {
               {needsDob ? "Date of birth (mm/dd/yyyy) is required when searching by name."
                 : demoHint || "Patient ID on its own, or name + date of birth."}
             </p>
+            {showSuggest && demos.length > 0 && (
+              <div className="table-wrap suggest">
+                <table>
+                  <thead><tr><th>Suggested member</th><th>DOB</th><th>Patient ID</th><th>Good for</th><th>Fill in</th></tr></thead>
+                  <tbody>
+                    {demos.map((p) => {
+                      const byId = name === p.id;
+                      const byName = name === p.name && dob === p.dob;
+                      return (
+                        <tr key={p.id} className={byId || byName ? "picked" : ""}>
+                          <td><b>{p.name}</b></td>
+                          <td className="mono nowrap">{toUS(p.dob)}</td>
+                          <td className="mono">{p.id}</td>
+                          <td className="muted">{p.hint}</td>
+                          <td className="nowrap">
+                            <div className="row tight">
+                              <button className={`ghost ${byId ? "active" : ""}`} onClick={() => { setName(p.id); setDob(""); }}>Use ID</button>
+                              <button className={`ghost ${byName ? "active" : ""}`} onClick={() => { setName(p.name); setDob(p.dob); }}>Use name + DOB</button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           <div className="row">
@@ -314,7 +340,17 @@ export default function App() {
             </label>
             <button className="primary" onClick={start} disabled={!canStart}>Translate &amp; find member</button>
             {!useLlm && <span className="hint">Keyword rules only</span>}
+            <button className="ghost small-btn" aria-expanded={!!prompt}
+              onClick={() => {
+                if (prompt) { setPrompt(null); return; }
+                setPromptError("");
+                api.prompt(note).then(setPrompt).catch((e) => setPromptError(e.message));
+              }}>
+              {prompt ? "Hide prompt" : "View prompt"}
+            </button>
           </div>
+          {promptError && <div className="banner error small">{promptError}</div>}
+          {prompt && <PromptView prompt={prompt} onRefresh={() => api.prompt(note).then(setPrompt)} stale={!prompt.messages[1].content.endsWith(note)} />}
         </section>
 
         <section className={`card ${plan ? "" : "dim"}`}>
@@ -395,6 +431,30 @@ export default function App() {
       </main>
 
       <TraceDock trace={trace} open={traceOpen} onToggle={() => setTraceOpen((o) => !o)} fhirBase={health?.fhirBase} />
+    </div>
+  );
+}
+
+function PromptView({ prompt, onRefresh, stale }) {
+  return (
+    <div className="prompt">
+      <div className="prompt-head">
+        <span className="hint">
+          What <b>Translate</b> sends to Azure OpenAI
+          {prompt.deployment ? <> · deployment <span className="mono">{prompt.deployment}</span></> : " · (no deployment configured)"}
+          {" · "}API <span className="mono">{prompt.apiVersion}</span>
+          {" · "}temperature <span className="mono">{prompt.temperature ?? "default"}</span>
+          {" · "}response_format <span className="mono">{prompt.responseFormat}</span>
+        </span>
+        {stale && <button className="ghost small-btn" onClick={onRefresh}>Refresh for the current note</button>}
+      </div>
+      {prompt.messages.map((m) => (
+        <div key={m.role} className="prompt-msg">
+          <div className="prompt-role mono">{m.role}</div>
+          <pre>{m.content}</pre>
+        </div>
+      ))}
+      <p className="hint">The reply must be JSON. Codes not on the allowed lists are dropped, dates are checked and capped at tomorrow, and measures named in the note are kept.</p>
     </div>
   );
 }

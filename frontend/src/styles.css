@@ -427,6 +427,28 @@ tr.missing { background: var(--bad-bg); }
 .row.tight button.ghost { padding: 0.2rem 0.6rem; font-size: 0.78rem; }
 .member-row { margin: 0; }
 .start-over { padding: 0.28rem 0.7rem; font-size: 0.78rem; }
+.small-btn { padding: 0.2rem 0.65rem; font-size: 0.78rem; }
+.suggest { margin-top: 0.3rem; }
+.prompt { margin-top: 0.4rem; border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 0.8rem; background: var(--head-bg); }
+.prompt-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+.prompt-msg { margin-bottom: 0.6rem; }
+.prompt-role { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.2rem; }
+.prompt pre {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.suggest td { vertical-align: middle; }
+.suggest .row.tight button.ghost { padding: 0.18rem 0.55rem; font-size: 0.74rem; }
 .chips.sub { margin-top: 0.25rem; }
 
 /* ---------- download status ---------- */

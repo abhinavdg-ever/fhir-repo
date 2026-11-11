@@ -86,6 +86,8 @@ export const api = {
 
   health: () => call("/api/health"),
   catalog: () => call("/api/catalog"),
+  prompt: (service_note) =>
+    call("/api/prompt", { method: "POST", body: JSON.stringify({ service_note, use_llm: true }) }),
   plan: (service_note, use_llm) =>
     call("/api/plan", { method: "POST", body: JSON.stringify({ service_note, use_llm }) }),
   patients: (name, birthdate) => {

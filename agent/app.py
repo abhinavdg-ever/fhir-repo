@@ -3,6 +3,7 @@
   GET  /api/health     FHIR base and whether Azure OpenAI is configured
   GET  /api/catalog    allowed document and result codes
   POST /api/plan       service note -> LOINC plan (502 if the LLM fails)
+  POST /api/prompt     the exact messages and settings that /api/plan would send to the model
   GET  /api/patients   find the member by name (+ optional DOB) or Patient ID
   POST /api/run        run the plan against Cerner (worker.main.handle_job)
   POST /api/run/stream the same, as NDJSON progress events (one line per LOINC call)
@@ -34,7 +35,7 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from agent.doc_types import DOCUMENT_CODES, OBSERVATION_CODES  # noqa: E402
-from agent.planner import LlmError, llm_configured, llm_settings, make_plan  # noqa: E402
+from agent.planner import LlmError, build_messages, llm_configured, llm_settings, make_plan  # noqa: E402
 from common.models import PacketRequest, Plan, PlanRequest, RunRequest  # noqa: E402
 from worker.fhir_client import CALL_LOG, FhirClient, FhirError, patient_summary  # noqa: E402
 from worker.main import CONCURRENCY, DOWNLOAD_CONCURRENCY, binary_allowed, build_packet, handle_job, run_job_events, safe  # noqa: E402
@@ -83,6 +84,13 @@ async def plan(req: PlanRequest):
         return await asyncio.to_thread(make_plan, req.service_note, req.use_llm)
     except LlmError as e:
         raise HTTPException(502, str(e))
+
+
+@app.post("/api/prompt")
+def prompt(req: PlanRequest):
+    s = llm_settings()
+    return {"deployment": s["deployment"] or None, "apiVersion": s["apiVersion"], "temperature": s["temperature"],
+            "responseFormat": "json_object", "messages": build_messages(req.service_note)}
 
 
 @app.get("/api/patients")

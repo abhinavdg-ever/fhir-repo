@@ -98,6 +98,7 @@ The **API trace** panel at the bottom lists every call for the current request �
 | GET | `/api/health` | — | `{fhirBase, llm, llmDeployment, llmTemperature}` |
 | GET | `/api/catalog` | — | allowed document and result codes |
 | POST | `/api/plan` | `{service_note, use_llm}` | plan (502 on LLM error) |
+| POST | `/api/prompt` | `{service_note}` | the exact messages and settings `/api/plan` sends to the model |
 | GET | `/api/patients` | `name`, `birthdate?` | patient summaries |
 | POST | `/api/run` | `{patient_id, plan, apply_dates, title_fallback}` | rows per LOINC call, observations, missing codes |
 | POST | `/api/run/stream` | same as `/api/run` | NDJSON events: `start`, `row` (one per LOINC call), `sweep`, `observations`, `done` |

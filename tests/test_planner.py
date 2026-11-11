@@ -50,3 +50,10 @@ def test_validate_caps_end_at_tomorrow_and_reads_measures_from_note():
                              "TRC - 2026 discharge summaries", TODAY)
     assert (plan.start, plan.end) == ("2026-01-01", "2026-11-12")
     assert plan.measures == ["TRC"]
+
+
+def test_build_messages_includes_allow_list_and_note():
+    from agent.planner import build_messages
+    system, user = build_messages("TRC 2026 discharge summaries", TODAY)
+    assert system["role"] == "system" and "18842-5: Discharge summary" in system["content"]
+    assert user["content"] == "Today is 2026-11-11.\nService note:\nTRC 2026 discharge summaries"
