@@ -8,7 +8,27 @@ const SAMPLES = {
   "All records": "All medical records from 1/1/2025 through 2026 YTD including Member Biographical Information Sheet",
 };
 
-const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
+// Test patients that have data, per FHIR server. All made-up sandbox/mock data.
+const DEMO_PATIENTS = {
+  sandbox: [
+    { id: "12724066", label: "Nancy Patchtest", hint: "Full record: ~990 progress notes, H&P, consults, discharge summaries, BP. Best for TRC / All records." },
+    { id: "12742400", label: "Tim Peters", hint: "Progress notes + BP. Quick CBP demo with a small packet." },
+    { id: "12744891", label: "Wilma Smart", hint: "Progress notes + BP, born 1950. CBP demo." },
+    { id: "12744580", label: "John Smart", hint: "Progress notes, no BP: results show up as missing." },
+    { id: "12744734", label: "Kelli Peters", hint: "Almost empty record: shows the missing-items sheet." },
+  ],
+  mock: [
+    { id: "12724066", label: "Jane Doe", hint: "Offline mock: 8 notes and 3 BP readings, all in 2026. Keep the date window on." },
+  ],
+};
+
+function demoPatientsFor(fhirBase = "") {
+  if (fhirBase.includes("/r4/mock")) return DEMO_PATIENTS.mock;
+  if (fhirBase.includes("fhir-open.cerner.com")) return DEMO_PATIENTS.sandbox;
+  return [];
+}
+
+const checkedOnly =(items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -58,9 +78,9 @@ export default function App() {
       setRun(null);
     });
 
-  const findPatients = () =>
+  const findPatients = (query = name, birthdate = dob) =>
     step("Searching patients…", async () => {
-      const list = await api.patients(name.trim(), dob);
+      const list = await api.patients(query.trim(), birthdate);
       setPatients(list);
       setPatientId(list.length === 1 ? list[0].id : "");
     });
@@ -168,12 +188,27 @@ export default function App() {
 
         <section className={`card ${plan ? "" : "dim"}`}>
           <h2><span className="num">2</span> Find the member</h2>
+          {demoPatientsFor(health?.fhirBase).length > 0 && (
+            <div className="row">
+              <span className="label">Try</span>
+              {demoPatientsFor(health?.fhirBase).map((p) => (
+                <button key={p.id + p.label} title={p.hint} disabled={!!busy}
+                  className={`ghost ${name === p.id ? "active" : ""}`}
+                  onClick={() => { setName(p.id); setDob(""); findPatients(p.id, ""); }}>
+                  {p.label} <span className="mono muted">{p.id}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {demoPatientsFor(health?.fhirBase).find((p) => p.id === name) && (
+            <p className="hint">{demoPatientsFor(health?.fhirBase).find((p) => p.id === name).hint}</p>
+          )}
           <div className="row wrap">
             <input className="grow" placeholder="Patient name or Patient ID" value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && name.trim() && !busy && findPatients()} />
             <input type="date" value={dob} onChange={(e) => setDob(e.target.value)} title="Date of birth (optional)" />
-            <button className="primary" onClick={findPatients} disabled={!!busy || !name.trim()}>Search</button>
+            <button className="primary" onClick={() => findPatients()} disabled={!!busy || !name.trim()}>Search</button>
           </div>
           {patients && patients.length === 0 && <p className="hint">No patients found.</p>}
           {patients && patients.length > 0 && (
