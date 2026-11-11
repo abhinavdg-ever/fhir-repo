@@ -54,7 +54,9 @@ export function useTrace(active) {
   }, []);
 
   const entries = [...appCalls, ...fhirCalls].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-  return { entries, clear };
+  // For requests made outside the main flow (e.g. loading visits): read the server log now.
+  const refresh = useCallback(() => setTimeout(poll, 300), [poll]);
+  return { entries, clear, refresh };
 }
 
 function time(iso) {

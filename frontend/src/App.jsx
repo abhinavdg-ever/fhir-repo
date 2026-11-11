@@ -251,11 +251,20 @@ export default function App() {
   // Encounter view: load the member's visits, and the notes of one visit.
   const loadVisits = async () => {
     const w = run.result.window || {};
-    const res = await api.encounters(run.result.patient.id, w.start, w.end);
-    setRun((r) => ({ ...r, visits: res.encounters, visitsRequest: res.request, visitsTruncated: res.truncated }));
+    try {
+      const res = await api.encounters(run.result.patient.id, w.start, w.end);
+      setRun((r) => ({ ...r, visits: res.encounters, visitsRequest: res.request, visitsTruncated: res.truncated }));
+    } finally {
+      trace.refresh();
+    }
   };
   const loadVisitDocs = async (encounterId) => {
-    const res = await api.encounterDocs(run.result.patient.id, encounterId);
+    let res;
+    try {
+      res = await api.encounterDocs(run.result.patient.id, encounterId);
+    } finally {
+      trace.refresh();
+    }
     setRun((r) => ({
       ...r,
       extraDocs: { ...(r.extraDocs || {}), ...Object.fromEntries(res.docs.map((d) => [d.id, d])) },
@@ -910,6 +919,25 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
   const [loading, setLoading] = useState(() => new Set());
   const [error, setError] = useState("");
   const [loadingVisits, setLoadingVisits] = useState(false);
+  const hasEncounterRows = r.rows.some((x) => x.resource === "Encounter");
+  const visitsLoaded = Array.isArray(run.visits);
+
+  // Plans without Encounter groups: load the member's visits as soon as this view opens.
+  const loadVisits = async () => {
+    setLoadingVisits(true);
+    setError("");
+    try {
+      await onLoadVisits();
+    } catch (e) {
+      setError(`Could not load visits: ${e.message}`);
+    } finally {
+      setLoadingVisits(false);
+    }
+  };
+  useEffect(() => {
+    if (!hasEncounterRows && !visitsLoaded && !loadingVisits && !error) loadVisits();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasEncounterRows, visitsLoaded]);
 
   // Visits: from the plan's Encounter groups and/or loaded on demand.
   const byId = new Map();
@@ -955,14 +983,22 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
   };
 
   if (!visits.length) {
+    const w = r.window || {};
     return (
       <div className="tab-panel">
-        <p className="hint">This plan did not ask for encounters. Load the member's visits and stays in the job window to group records by visit.</p>
-        <button className="primary" disabled={loadingVisits} onClick={async () => {
-          setLoadingVisits(true); setError("");
-          try { await onLoadVisits(); } catch (e) { setError(`Could not load visits: ${e.message}`); } finally { setLoadingVisits(false); }
-        }}>{loadingVisits ? "Loading visits…" : "Load visits"}</button>
-        {error && <div className="banner error small">{error}</div>}
+        {loadingVisits || (!hasEncounterRows && !visitsLoaded && !error) ? (
+          <div className="banner busy"><span className="spinner" aria-hidden="true" />Loading the member's visits and stays…</div>
+        ) : error ? (
+          <>
+            <div className="banner error small">{error}</div>
+            <button className="ghost" onClick={loadVisits}>Try again</button>
+          </>
+        ) : (
+          <p className="hint">
+            No visits or stays for this member{w.start ? ` from ${toUS(w.start)} to before ${toUS(w.end)}` : ""}.
+            {w.start ? " Untick Apply Date Window and fetch again to look at every date." : ""}
+          </p>
+        )}
       </div>
     );
   }
