@@ -137,7 +137,7 @@ class FhirClient:
                 CALL_LOG.add(method="GET", url=full_url, accept=accept, status=None, attempt=attempt + 1,
                              ms=round((time.monotonic() - started) * 1000), error=type(e).__name__)
                 if attempt == retries:
-                    raise FhirError(0, url, f"{type(e).__name__} after {retries + 1} tries") from e
+                    raise FhirError(0, url, f"{type(e).__name__} after {retries + 1} tries: {str(e)[:300]}") from e
                 await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
                 continue
             except httpx.HTTPError as e:

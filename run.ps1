@@ -5,11 +5,12 @@
     .\run.ps1 -Dev       # auto-reload on code changes
     .\run.ps1 -Mock      # also start the offline mock FHIR server on :9000
     .\run.ps1 -Test      # run the test suite
+    .\run.ps1 -Check     # check this machine can reach Cerner and Azure OpenAI
 
   Host and port come from APP_HOST / APP_PORT (environment, else .env; defaults 127.0.0.1 / 8000).
   If PowerShell blocks scripts, use run.cmd instead.
 #>
-param([switch]$Dev, [switch]$Mock, [switch]$Test)
+param([switch]$Dev, [switch]$Mock, [switch]$Test, [switch]$Check)
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
@@ -47,6 +48,7 @@ if (-not (Test-Path ".env")) {
 }
 
 if ($Test) { & $venvPython -m pytest -q tests; exit $LASTEXITCODE }
+if ($Check) { & $venvPython -m dev.check; exit $LASTEXITCODE }
 
 # Read APP_HOST / APP_PORT from .env (ignoring comments).
 $envVars = @{}

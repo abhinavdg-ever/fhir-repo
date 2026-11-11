@@ -45,11 +45,12 @@ Needs **Python 3.10+**. Node is only needed to change the UI — the built UI in
 .\run.cmd -Dev       # auto-reload while editing code
 .\run.cmd -Mock      # also start the offline mock FHIR server on :9000
 .\run.cmd -Test      # run the tests
+.\run.cmd -Check     # check this machine can reach Cerner (Patient, DocumentReference, Binary) and Azure OpenAI
 ```
 
 `run.cmd` calls `run.ps1` with `-ExecutionPolicy Bypass`, so it works even where PowerShell blocks scripts. It finds Python through the `py` launcher (or `python` on PATH).
 
-**macOS / Linux:** `./run.sh` (same options: `--dev`, `--mock`, `--test`).
+**macOS / Linux:** `./run.sh` (same options: `--dev`, `--mock`, `--test`, `--check`).
 
 Then open **http://localhost:8000** and fill in `AOAI_ENDPOINT` / `AOAI_API_KEY` in `.env` to use Azure OpenAI.
 
@@ -70,6 +71,7 @@ uvicorn agent.app:app --port 8000
 | Others on the network open the app | `APP_HOST=0.0.0.0` in `.env`, and allow the port in Windows Defender Firewall: `New-NetFirewallRule -DisplayName "FHIR Retrieval" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow` (admin PowerShell) |
 | A different port | `APP_PORT=8080` in `.env`, or `$env:APP_PORT="8080"; .\run.ps1` |
 | `CERTIFICATE_VERIFY_FAILED` to Cerner or Azure | Corporate HTTPS inspection: set `USE_SYSTEM_CERTS=true` so the Windows certificate store is used |
+| `curl.exe` fails with `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | Windows curl (Schannel) can't reach the certificate authority's revocation server, often blocked on VMs. Add `--ssl-no-revoke` to curl. **The app is not affected** (Python doesn't do that online check); keep `USE_SYSTEM_CERTS=false` |
 | A proxy | Set `HTTPS_PROXY=http://proxy:port` (and `NO_PROXY=localhost,127.0.0.1`) before starting; httpx and the OpenAI SDK honour them |
 | Keep it running after logoff | Run `run.cmd` from Task Scheduler ("At startup", "Run whether user is logged on or not"), or wrap it with a service manager such as NSSM |
 | Edit `.env` | Any editor is fine; save as UTF-8 (Notepad's default) |
@@ -77,6 +79,32 @@ uvicorn agent.app:app --port 8000
 Line endings are normalised by `.gitattributes`, so a Windows clone works without changes. The text sheets in the packet use Windows line endings.
 
 UI work (Node 18+): `cd frontend && npm install && npm run dev`, then open http://localhost:5173 (it proxies `/api` to :8000). Run `npm run build` to refresh `frontend/dist`.
+
+## Try Cerner with curl
+
+The open sandbox needs no login. Patient `12742400` is Tim Peters (DOB 1990-09-15). On Windows type `curl.exe` (in PowerShell plain `curl` is a different command), and add `--ssl-no-revoke` if you get `CRYPT_E_NO_REVOCATION_CHECK`.
+
+```bash
+# Patient by ID, then by name + DOB
+curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Patient/12742400"
+curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Patient?family=Peters&given=Tim&birthdate=1990-09-15"
+
+# History & physical notes (LOINC 34117-2) in a date window; the | is URL-encoded as %7C
+curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/DocumentReference?patient=12742400&type=http://loinc.org%7C34117-2&_count=100&period=ge2025-01-01&period=lt2026-11-12"
+
+# One note's file: the URL is content[].attachment.url from the search above.
+# Accept must be the file's own type or application/fhir+json; anything else (e.g. */*) gets 406.
+curl -H "Accept: application/pdf" -o note.pdf "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Binary/XR-208978749"
+
+# Blood pressure results
+curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Observation?patient=12742400&code=http://loinc.org%7C85354-9&_count=10"
+```
+
+Windows example:
+
+```powershell
+curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Patient/12742400"
+```
 
 ## Playing with the model (`.env`)
 

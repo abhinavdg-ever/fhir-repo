@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Set up and start FHIR Record Retrieval on macOS / Linux.
-#   ./run.sh          ./run.sh --dev (auto-reload)          ./run.sh --mock          ./run.sh --test
+#   ./run.sh    ./run.sh --dev (auto-reload)    ./run.sh --mock    ./run.sh --test    ./run.sh --check
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -20,6 +20,7 @@ fi
 
 case "${1:-}" in
   --test) exec .venv/bin/python -m pytest -q tests ;;
+  --check) exec .venv/bin/python -m dev.check ;;
 esac
 
 env_value() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed 's/#.*//' | xargs; }
