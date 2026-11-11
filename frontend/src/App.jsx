@@ -381,7 +381,7 @@ export default function App() {
               <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
               Use Azure OpenAI
             </label>
-            <button className="primary" onClick={start} disabled={!canStart}>Translate &amp; find member</button>
+            <button className="primary" onClick={start} disabled={!canStart}>Translate &amp; Find Member</button>
             {!useLlm && <span className="hint">Keyword rules only</span>}
             <button className="ghost small-btn" aria-expanded={!!prompt}
               onClick={() => {
@@ -494,9 +494,6 @@ export default function App() {
           </div>
           {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply Date window”.</p>}
           <p className="hint">Sandbox data is often older than the request window — untick “Apply Date Window” if nothing comes back.</p>
-          {health?.fhirMaxRps > 0 && (
-            <p className="hint">Requests to Cerner are spaced out: at most {health.fhirMaxRps}/s, {health.fhirConcurrency} codes at a time, with automatic retry when Cerner throttles.</p>
-          )}
 
           {plan?.all_records && <p className="hint">The service note asks for <b>all medical records</b>: every record the member has goes in the packet (the plan codes plus everything under “Other records”).</p>}
 
@@ -997,9 +994,10 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
 
   const tabs = [
     { id: "overview", label: "Overview" },
-    ...docRows.map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count, state: row.error ? "error" : row.count ? "" : "missing" })),
-    ...(run.progress.discover ? [{ id: "other", label: "Other records", count: r.other ? (pickedDocs.length ? `${pickedDocs.length}/${otherDocs.length}` : otherDocs.length) : undefined, state: r.otherError ? "error" : "other" }] : []),
-    ...(run.progress.observations ? [{ id: "results", label: "Results", count: r.observations.length, state: r.observationError ? "error" : "" }] : []),
+    // Only tabs with at least one record; codes with nothing found stay listed in Overview.
+    ...docRows.filter((row) => row.count > 0).map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count })),
+    ...(otherDocs.length > 0 ? [{ id: "other", label: "Other records", count: pickedDocs.length ? `${pickedDocs.length}/${otherDocs.length}` : otherDocs.length, state: "other" }] : []),
+    ...(r.observations.length > 0 ? [{ id: "results", label: "Results", count: r.observations.length }] : []),
     { id: "packet", label: "Packet", count: run.done ? files.length : undefined },
   ];
 
@@ -1061,7 +1059,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                     const row = docRows.find((x) => x.code === c.code);
                     const latest = row?.docs.map((d) => d.date || d.start).filter(Boolean).sort().pop();
                     return (
-                      <tr key={c.code} className={`clickable ${row && row.count === 0 ? "missing" : ""}`} onClick={() => row && setTab(c.code)}>
+                      <tr key={c.code} className={`${row?.count ? "clickable" : ""} ${row && row.count === 0 ? "missing" : ""}`} onClick={() => row?.count && setTab(c.code)}>
                         <td className="mono code">{c.code}</td>
                         <td>{c.label}</td>
                         <td>{row?.required ? <span className="chip warn">required</span> : <span className="muted small">{row ? "optional" : ""}</span>}</td>
@@ -1076,7 +1074,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                     );
                   })}
                   {run.progress.discover && (
-                    <tr className="clickable" onClick={() => setTab("other")}>
+                    <tr className={otherDocs.length ? "clickable" : ""} onClick={() => otherDocs.length && setTab("other")}>
                       <td className="mono code">other</td>
                       <td>Other records (not in the plan)</td>
                       <td></td>
@@ -1088,7 +1086,8 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                     </tr>
                   )}
                   {run.progress.observations && (
-                    <tr className="clickable" onClick={() => setTab("results")}>
+                    <tr className={`${r.observations.length ? "clickable" : ""} ${run.done && !r.observations.length ? "missing" : ""}`}
+                      onClick={() => r.observations.length && setTab("results")}>
                       <td className="mono code">results</td>
                       <td>Observations (BP / HbA1c / GMI)</td>
                       <td>{run.plan.observations.some((o) => o.required) ? <span className="chip warn">required</span> : <span className="muted small">optional</span>}</td>
@@ -1099,7 +1098,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                 </tbody>
               </table>
             </div>
-            <p className="hint">Click a row or a tab to see its notes.</p>
+            <p className="hint">Click a row or a tab to see its records. Codes with nothing found have no tab; they are listed here and on the missing-items sheet.</p>
           </>
         )}
 

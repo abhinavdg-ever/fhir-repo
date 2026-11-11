@@ -122,7 +122,7 @@ export function TraceDock({ trace, open, onToggle, fhirBase }) {
           {shown.length === 0 ? (
             <p className="hint trace-empty">
               {entries.length === 0
-                ? "No calls yet. Each request (Translate & find member, Fetch, Download packet) starts a fresh trace."
+                ? "No calls yet. Each request (Translate & Find Member, Fetch, Download packet) starts a fresh trace."
                 : "No calls match this filter."}
             </p>
           ) : (
