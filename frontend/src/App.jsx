@@ -109,6 +109,9 @@ export default function App() {
     setPlan({ ...plan, [kind]: [...plan[kind], { code, label: hit?.label || code, reason: "added by you", on: true }] });
   };
 
+  const isPatientId = /^\d+$/.test(name.trim());
+  const needsDob = name.trim() !== "" && !isPatientId && !dob;
+  const canSearch = !busy && name.trim() !== "" && !needsDob;
   const selected = plan ? plan.documents.filter((d) => d.on).length + plan.observations.filter((o) => o.on).length : 0;
 
   return (
@@ -206,10 +209,17 @@ export default function App() {
           <div className="row wrap">
             <input className="grow" placeholder="Patient name or Patient ID" value={name}
               onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && name.trim() && !busy && findPatients()} />
-            <input type="date" value={dob} onChange={(e) => setDob(e.target.value)} title="Date of birth (optional)" />
-            <button className="primary" onClick={() => findPatients()} disabled={!!busy || !name.trim()}>Search</button>
+              onKeyDown={(e) => e.key === "Enter" && canSearch && findPatients()} />
+            <input type="date" value={dob} onChange={(e) => setDob(e.target.value)}
+              className={needsDob ? "invalid" : ""} aria-invalid={needsDob} required={!isPatientId}
+              title={isPatientId ? "Date of birth (optional with a Patient ID)" : "Date of birth (required with a name)"} />
+            <button className="primary" onClick={() => findPatients()} disabled={!canSearch}>Search</button>
           </div>
+          <p className={`hint ${needsDob ? "warn-text" : ""}`}>
+            {needsDob
+              ? "Date of birth is required when searching by name."
+              : "Search by Patient ID, or by name + date of birth."}
+          </p>
           {patients && patients.length === 0 && <p className="hint">No patients found.</p>}
           {patients && patients.length > 0 && (
             <div className="table-wrap">

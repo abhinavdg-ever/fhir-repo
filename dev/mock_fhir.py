@@ -84,8 +84,9 @@ def in_window(when: str, params: list[tuple[str, str]], key: str) -> bool:
 
 
 @app.get("/r4/mock/Patient")
-def patients(name: str = ""):
+def patients(name: str = "", birthdate: str = ""):
     hit = name.lower() in "jane doe doe, jane" if name else True
+    hit = hit and (not birthdate or birthdate == PATIENT["birthDate"])
     return bundle([PATIENT] if hit else [])
 
 

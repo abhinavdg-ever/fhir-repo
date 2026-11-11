@@ -178,6 +178,8 @@ h3 {
 .small { font-size: 0.75rem; }
 .mono { font-family: var(--font-mono); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .bad { color: var(--bad-fg); font-weight: 600; }
+.warn-text { color: var(--warn-fg); }
+input.invalid { border-color: var(--warn-fg); }
 .grow { flex: 1 1 14rem; min-width: 0; }
 
 /* ---------- controls ---------- */

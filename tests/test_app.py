@@ -30,3 +30,9 @@ def test_plan_without_llm_uses_rules():
     r = client.post("/api/plan", json={"service_note": "2026 discharge summaries", "use_llm": False})
     assert r.status_code == 200
     assert r.json()["source"] == "rules"
+
+
+def test_patient_name_search_requires_dob():
+    r = client.get("/api/patients", params={"name": "jane"})
+    assert r.status_code == 400
+    assert "Date of birth" in r.json()["detail"]

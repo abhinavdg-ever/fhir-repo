@@ -67,7 +67,7 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 
 `FHIR_BASE` defaults to the open sandbox `https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d` (no auth).
 
-- Type `12724066` in the patient box to load that test patient.
+- Type `12724066` in the patient box to load that test patient. A name search needs the date of birth too (e.g. `peters` + 1990-09-15).
 - Sandbox notes are often outside the window — untick **Apply date window**.
 - Tick **Also match notes by title** to catch notes with no LOINC on `type`.
 - The open sandbox rate-limits (HTTP 429); a limited call shows as an error on its row instead of failing the run.

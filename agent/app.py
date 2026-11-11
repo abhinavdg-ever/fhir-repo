@@ -72,6 +72,12 @@ async def plan(req: PlanRequest):
 
 @app.get("/api/patients")
 async def patients(name: str, birthdate: str | None = None):
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "Enter a patient name or Patient ID")
+    if not name.isdigit() and not birthdate:
+        # A name alone matches too many people to pick the right member's chart.
+        raise HTTPException(400, "Date of birth is required when searching by name")
     c = client()
     try:
         return [patient_summary(p) for p in await c.find_patients(name, birthdate)]
