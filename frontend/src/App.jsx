@@ -22,6 +22,10 @@ const DEMO_PATIENTS = {
     { id: "12744580", name: "Smart John", dob: "1990-09-16", hint: "Progress notes, no BP: results come back missing." },
     { id: "12752183", name: "Joe Homenick", dob: "1977-08-25", hint: "BP readings but no progress notes: document codes come back missing." },
     { id: "12744734", name: "Kelli Peters", dob: "1964-04-04", hint: "Almost empty record: shows the missing-items sheet." },
+    { id: "12803698", name: "Joe Briggs", dob: "2001-01-01", hint: "14 inpatient stays and 40 BP readings: TRC and the encounter view. By name it matches 2 members." },
+    { id: "12744733", name: "Jon Peters", dob: "1955-05-05", hint: "Notes and a few BP readings, older member: CBP / BPD." },
+    { id: "14741431", name: "Joek Jackson", dob: "1988-09-30", hint: "One BP reading and no notes: the notes come back missing." },
+    { id: "12766709", name: "FHIR CERNER, Joe", dob: "2012-05-17", hint: "Child with 3 inpatient stays. Two-word last name: type it as “FHIR CERNER, Joe”." },
   ],
   mock: [
     { id: "12724066", name: "Jane Doe", dob: "1958-04-02", hint: "Offline mock: 8 notes and 3 BP readings, all in 2026. Keep the date window on." },
@@ -336,7 +340,13 @@ export default function App() {
         {busy && <div className="banner busy"><span className="spinner" aria-hidden="true" />{busy}</div>}
 
         <section className="card request-card">
-          <h2>Request</h2>
+          <div className="card-head">
+            <h2>Request</h2>
+            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env" : "Read the service note with Azure OpenAI; untick for keyword rules"}>
+              <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
+              Use Azure OpenAI
+            </label>
+          </div>
 
           <div className="field">
             <div className="field-head">
@@ -403,10 +413,6 @@ export default function App() {
           </div>
 
           <div className="row">
-            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env" : ""}>
-              <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
-              Use Azure OpenAI
-            </label>
             <button className="primary" onClick={start} disabled={!canStart}>Translate &amp; Find Member</button>
             {!useLlm && <span className="hint">Keyword rules only</span>}
             <button className="ghost small-btn" aria-expanded={!!prompt}

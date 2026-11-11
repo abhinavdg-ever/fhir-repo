@@ -419,7 +419,8 @@ tr.missing { background: var(--bad-bg); }
 .tab-panel .banner { margin-bottom: 0.6rem; }
 
 /* ---------- request card ---------- */
-.request-card h2 { margin-bottom: 0.6rem; }
+.request-card h2 { margin: 0; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
 .field { margin-bottom: 0.85rem; }
 .field-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.4rem 0.75rem; margin-bottom: 0.4rem; }
 .field-head > label { font-weight: 600; font-size: 0.86rem; }
