@@ -180,6 +180,41 @@ Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) 
 
 The packet is a background job: each note's file is a separate `GET Binary/{id}` call (the DocumentReference's `content[].attachment.url`), so a large record takes a few minutes. The page stays usable meanwhile and each note's Status shows Queued → Downloading → Done / Failed. The zip is held in memory until saved.
 
+**Agent output (clinical intent).** The agent — Azure OpenAI, or the keyword rules when it is off — returns one JSON object in this shape (see *Agent output (JSON)* in step 1):
+
+```json
+{
+  "measure_codes": ["GSD"],
+  "mode": "measure_specific",
+  "date_windows": [
+    {"purpose": "job_envelope", "from": "2025-01-01", "to": "2025-12-31"},
+    {"purpose": "measurement_year", "from": "2025-01-01", "to": "2025-12-31"}
+  ],
+  "resource_groups": [
+    {"resource": "Patient", "purpose": "demographics", "required": true},
+    {"resource": "DiagnosticReport", "purpose": "lab_report", "required": true},
+    {"resource": "Observation", "purpose": "hba1c_or_gmi", "required": true},
+    {"resource": "DocumentReference", "purpose": "progress_notes", "required": false},
+    {"resource": "DocumentReference", "purpose": "referrals_consults", "required": false}
+  ],
+  "clinical_targets": [{"kind": "hba1c", "any_history": false, "through": null}],
+  "fallback_strategy": "strict",
+  "notes": "GSD - REQUIRED - Member demographic sheet: Name and date of birth. Latest 2025 hemoglobin A1c..."
+}
+```
+
+| Field | Values | What the app does with it |
+| --- | --- | --- |
+| `mode` | `measure_specific`, `all_records`, `general` | `all_records` puts every record in the packet |
+| `date_windows` | `job_envelope` (always), `measurement_year` | documents, lab reports and encounters use the job envelope; results use the measurement year |
+| `resource_groups` | `Patient`, `DocumentReference`, `Observation`, `DiagnosticReport`, `Encounter` + a purpose from `agent/doc_types.py` `PURPOSES` | each purpose maps to LOINC codes / a report category / encounter classes; `required` groups with nothing found are listed as gaps |
+| `clinical_targets` | `hba1c`, `gmi`, `blood_pressure` | pick the result codes; `any_history` drops the lower date bound, `through` caps it |
+| `fallback_strategy` | `strict`, `title_match`, `broad`, `progress_notes_if_missing` | sets *Match By Doc Name* / *List Other Records*; `progress_notes_if_missing` adds every progress note in the window when a required element is missing |
+
+The output is validated before anything reaches Cerner: unknown groups and targets are dropped, dates are checked and never run past today, the job envelope stops at the last year the note names unless it says YTD / to date, and for a named measure the required groups are fixed by the measure (TRC: admission, discharge summary and instructions, medication reconciliation, progress notes; GSD: lab report and HbA1c/GMI; CBP and BPD: blood pressure).
+
+**Encounters** give each note its facility; when inpatient notes come from more than one facility the UI and the missing-items sheet flag it (the request asks for one facility per record). **Lab reports** come from `DiagnosticReport?category=LAB`; their attached files go in the packet. The missing-items sheet starts with the required elements not in the record, in the note's own wording (e.g. "Discharge medications not reconciled").
+
 **Document types.** `agent/doc_types.py` lists 24 document LOINC codes, including the ones Cerner actually puts on notes (e.g. `83805-2` admission note, `28623-7` nursing narrative, `28568-4` / `57053-1` ED physician / nurse, `34108-1` outpatient, `18761-7` transfer summary, `11504-8` operative report). Title keywords include Cerner's own titles ("Inpatient Clinical Summary" is a discharge summary).
 
 **Match By Doc Name** (optional) catches notes Cerner never coded with LOINC: exact keyword hits score 1.0, and close titles ("Nursing Narr", "Discharge Sumary") match on similarity (`TITLE_MATCH_MIN`, default 0.82) and show as *close title match NN%*. Notes that have a different LOINC code are not pulled in by title.

@@ -229,10 +229,32 @@ class FhirClient:
 
     # ---- Observation ----
     async def observations(self, pid: str, codes: list[str], start: str | None, end: str | None) -> list[dict]:
+        """start or end may be None (e.g. any_history: no lower bound)."""
         params = [("patient", pid), ("code", ",".join(f"{LOINC}|{c}" for c in codes)), ("_count", "200")]
-        if start and end:
-            params += [("date", f"ge{start}"), ("date", f"lt{end}")]
+        if start:
+            params.append(("date", f"ge{start}"))
+        if end:
+            params.append(("date", f"lt{end}"))
         return await self.search("Observation", params)
+
+    # ---- DiagnosticReport / Encounter: Cerner wants a time on these date filters ----
+    @staticmethod
+    def _timestamp_window(start: str | None, end: str | None) -> list[tuple[str, str]]:
+        params = []
+        if start:
+            params.append(("date", f"ge{start}T00:00:00Z"))
+        if end:
+            params.append(("date", f"lt{end}T00:00:00Z"))
+        return params
+
+    async def diagnostic_reports(self, pid: str, category: str, start: str | None, end: str | None) -> SearchResults:
+        params = [("patient", pid), ("category", category), ("_count", "100")]
+        return await self.search("DiagnosticReport", params + self._timestamp_window(start, end))
+
+    async def encounters(self, pid: str, start: str | None, end: str | None) -> SearchResults:
+        # Cerner ignores ?class=, so every encounter comes back and is sorted by class afterwards.
+        params = [("patient", pid), ("_count", "100")]
+        return await self.search("Encounter", params + self._timestamp_window(start, end))
 
     # ---- Binary ----
     async def download_binary(self, url: str, content_type: str | None) -> tuple[bytes, str]:
@@ -327,3 +349,42 @@ def obs_summary(o: dict) -> dict:
         "performer": ", ".join(p.get("display", "") for p in o.get("performer", []) if p.get("display")),
         "encounter": (o.get("encounter") or {}).get("reference", ""),
     }
+
+
+def report_summary(r: dict) -> dict:
+    """A DiagnosticReport flattened like a document, so it can be listed and packeted the same way."""
+    code = r.get("code", {})
+    forms = [f for f in r.get("presentedForm", []) if f.get("url")]
+    order = ["application/pdf", "text/html", "application/xhtml+xml", "text/plain", "text/rtf", "application/xml", "text/xml"]
+    best = min(forms, key=lambda f: order.index(f.get("contentType")) if f.get("contentType") in order else len(order),
+               default={})
+    when = r.get("effectiveDateTime") or (r.get("effectivePeriod") or {}).get("start") or r.get("issued") or ""
+    return {
+        "id": f"DR-{r.get('id')}", "status": r.get("status"), "docStatus": r.get("status"),
+        "title": code.get("text") or next((c.get("display") for c in code.get("coding", []) if c.get("display")), "") or "Lab report",
+        "loinc": [c.get("code") for c in code.get("coding", []) if c.get("system") == LOINC],
+        "localCodes": [], "date": when[:10],
+        "author": ", ".join(p.get("display", "") for p in r.get("performer", []) if p.get("display")),
+        "encounter": (r.get("encounter") or {}).get("reference", ""),
+        "contentType": best.get("contentType"), "binaryUrl": best.get("url"),
+        "results": len(r.get("result", [])),
+    }
+
+
+def encounter_summary(e: dict) -> dict:
+    cls = e.get("class") or {}
+    period = e.get("period") or {}
+    facility = (e.get("serviceProvider") or {}).get("display") or next(
+        ((loc.get("location") or {}).get("display") for loc in e.get("location", []) if (loc.get("location") or {}).get("display")), "")
+    hosp = e.get("hospitalization") or {}
+    return {
+        "id": e.get("id"), "status": e.get("status"), "class": cls.get("code") or "", "classDisplay": cls.get("display") or "",
+        "type": next((t.get("text") for t in e.get("type", []) if t.get("text")), ""),
+        "start": (period.get("start") or "")[:10], "end": (period.get("end") or "")[:10],
+        "date": (period.get("start") or "")[:10],
+        "facility": facility,
+        "reason": next((r.get("text") for r in e.get("reasonCode", []) if r.get("text")), ""),
+        "dischargeDisposition": (hosp.get("dischargeDisposition") or {}).get("text") or "",
+        "binaryUrl": None,
+    }
+

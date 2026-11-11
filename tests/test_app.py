@@ -347,3 +347,48 @@ def test_run_groups_other_records_and_matches_titles(monkeypatch):
     groups = {g["key"]: g["count"] for g in result["other"]}
     assert groups["83805-2"] == 2 and groups["89821-3"] == 1 and sum(groups.values()) == 4
     assert next(g for g in result["other"] if g["key"] == "83805-2")["inCatalog"] is True
+
+
+def test_run_reports_encounters_facility_and_gaps(monkeypatch):
+    import json
+
+    from agent.planner import rules_plan
+    from worker import main as worker_main
+
+    async def fake_patient(self, pid):
+        return {"resourceType": "Patient", "id": pid, "name": [{"text": "Doe, Jane"}], "birthDate": "1958-04-02"}
+
+    def note(id_, code, enc):
+        return {"resourceType": "DocumentReference", "id": id_, "status": "current", "type": {"text": "Note"},
+                "date": "2026-03-01T00:00:00Z", "context": {"encounter": [{"reference": f"Encounter/{enc}"}]},
+                "content": [{"attachment": {"contentType": "application/pdf", "url": f"https://h.cerner.com/r4/t/Binary/XR-{id_}"}}]}
+
+    async def fake_docs(self, pid, code, start, end):
+        return {"18842-5": [note("1", code, "E1")], "83805-2": [note("2", code, "E2")]}.get(code, [])
+
+    async def fake_encounters(self, pid, start, end):
+        enc = lambda id_, cls, fac: {"resourceType": "Encounter", "id": id_, "status": "finished",
+                                     "class": {"code": cls}, "period": {"start": "2026-03-01T00:00:00Z"},
+                                     "serviceProvider": {"display": fac}}
+        return [enc("E1", "IMP", "General Hospital"), enc("E2", "IMP", "City Hospital"), enc("E3", "AMB", "Clinic")]
+
+    monkeypatch.setattr(worker_main.FhirClient, "get_patient", fake_patient)
+    monkeypatch.setattr(worker_main.FhirClient, "documents_by_loinc", fake_docs)
+    monkeypatch.setattr(worker_main.FhirClient, "encounters", fake_encounters)
+    from tests.test_planner import TODAY, TRC_NOTE
+    plan = rules_plan(TRC_NOTE, TODAY).model_dump(by_alias=True)
+    r = client.post("/api/run/stream", json={"patient_id": "1", "plan": plan})
+    result = json.loads(r.text.splitlines()[-1])["result"]
+    stays = next(x for x in result["rows"] if x["code"] == "inpatient_stays")
+    assert stays["resource"] == "Encounter" and stays["count"] == 2
+    assert next(x for x in result["rows"] if x["code"] == "outpatient_visits")["count"] == 1
+    assert result["facilityWarning"]["facilities"] == {"General Hospital": 1, "City Hospital": 1}
+    notations = [g["notation"] for g in result["gaps"]]
+    assert "Discharge medications not reconciled" in notations
+    assert result["fallbackNote"] and result["intent"]["fallback_strategy"] == "progress_notes_if_missing"
+
+    from common.models import Plan
+    from worker.main import missing_sheet
+    sheet = missing_sheet(result["patient"], Plan.model_validate(plan), result)
+    assert "ELEMENTS NOT IN THE RECORD" in sheet and "Discharge medications not reconciled" in sheet
+    assert "FACILITY CHECK" in sheet and "[required]" in sheet

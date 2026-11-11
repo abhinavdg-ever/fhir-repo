@@ -3,10 +3,12 @@ import { api } from "./api.js";
 import { TraceDock, useTrace } from "./trace.jsx";
 import { DateInput, toUS } from "./dates.jsx";
 
+// Real chart-chase service notes.
 const SAMPLES = {
-  TRC: "TRC - REQUIRED - Member demographic sheet: Name and date of birth, 2026 Evidence of discharge medication reconciliations, medication lists and medication reviews, 2026 Hospital discharge summaries, 2026 Hospital discharge instructions, 2026 Documentation of notification of inpatient admissions or evidence of admission orders, 2026 Specialist consultation reports, 2026 Progress notes and telehealth's. Require inpatient and outpatient records. Note: Inpatient notes should be only from one facility per record.",
-  CBP: "CBP - REQUIRED - Member demographic sheet: Name and date of birth. Last blood pressure reading in 2026 – may be from a vital signs flowsheet or a progress note. Please note: Provider name must be included on documentation. Telehealth and patient reported BP is acceptable.",
-  GSD: "GSD - REQUIRED - Member demographic sheet: Name and date of birth. Latest 2025 hemoglobin A1c (HbA1c), GMI value from 2025 lab result or progress note. Referrals, specialist or consultation notes. Hospital laboratory records, Progress notes.",
+  TRC: "TRC - REQUIRED - Member demographic sheet: Name and date of birth, 2026 Evidence of discharge medication reconciliations, medication lists and medication reviews, 2026 Hospital discharge summaries, 2026 Hospital discharge instructions, 2026 Documentation of notification of inpatient admissions or evidence of admission orders, 2026 Specialist consultation reports, 2026 Progress notes and telehealth's. Require inpatient and outpatient records. If you are not sure you have this information within the record, please send all progress notes for 2026 with notation of the elements you do not have in the record (i.e.: Discharge medications not reconciled, or hospital stay not reported to this office.) Note: Inpatient notes should be only from one facility per record.",
+  CBP: "CBP - REQUIRED - Member demographic sheet: Name and date of birth. Last blood pressure reading in 2025 – may be from a vital signs flowsheet or a progress note. Please note: Provider name must be included on documentation. Telehealth and patient reported BP is acceptable. Exception: If the blood pressure reading was taken on the same day as a diagnostic test/procedure that required a change in diet or medication regimen (for example: colonoscopy), please send the blood pressure reading from the appointment just prior to that date of service. A blood pressure reading on the same day as a fasting blood test is acceptable. If you are not sure you have this qualified information within the record, please send all the progress notes for 2025 and all captured blood pressures, for review noting that you do not believe you have a qualifying BP.",
+  BPD: "BPD - REQUIRED - Member demographic sheet: Name and date of birth. Last blood pressure reading in 2025 – may be from a vital signs flowsheet or a progress note. Please note: Provider name must be included on documentation. Telehealth and patient reported BP is acceptable. Exception: If the blood pressure reading was taken during as acute inpatient stay or an ED visit or on the same day as a diagnostic test/procedure that required a change in diet or medication regimen (for example: colonoscopy or stress test), please send the blood pressure reading from the appointment just prior to that date of service. A blood pressure reading on the same day as a fasting blood test is acceptable. If you are not sure you have this qualified information within the record, please send all the progress notes for 2025 and all captured blood pressures, for review noting that you do not believe you have a qualifying BP.",
+  GSD: "GSD - REQUIRED - Member demographic sheet: Name and date of birth. Latest 2025 hemoglobin A1c (HbA1c), GMI value from 2025 lab result or progress note. Please note: 2025 Diabetes flow sheets or 2025 Progress notes. Member history information: reviewed and signed. Lab results or lab flowsheets (e.g., HbA1c). Referrals, specialist or consultation notes. Hospital laboratory records, Progress notes. If you are not sure you have this information within the record, please send all the required listed documents you have from 2025 for review with notation of the elements you do not have in the record.",
   "All records": "All medical records from 1/1/2025 through 2026 YTD including Member Biographical Information Sheet",
 };
 
@@ -135,10 +137,7 @@ export default function App() {
       const [planRes, patientsRes] = await Promise.allSettled([api.plan(note, useLlm), api.patients(name.trim(), dob)]);
       const problems = [];
       if (planRes.status === "fulfilled") {
-        const on = (items) => items.map((i) => ({ ...i, on: true }));
-        setPlan({ ...planRes.value, documents: on(planRes.value.documents), observations: on(planRes.value.observations) });
-        setIncludeOther(!!planRes.value.all_records);
-        if (planRes.value.all_records) setDiscover(true);
+        adoptPlan(planRes.value);
       } else {
         problems.push(`Service note: ${planRes.reason.message}`);
       }
@@ -151,20 +150,30 @@ export default function App() {
       if (problems.length) throw new Error(problems.join(" · "));
     });
 
+  // Take the agent's plan: every code on, and the fetch options its fallback_strategy asks for.
+  const adoptPlan = (p) => {
+    const on = (items = []) => items.map((i) => ({ ...i, on: true }));
+    setPlan({ ...p, documents: on(p.documents), observations: on(p.observations), reports: on(p.reports), encounters: on(p.encounters) });
+    const fallback = p.intent?.fallback_strategy || "strict";
+    setTitleFallback(fallback === "title_match" || fallback === "broad");
+    setDiscover(fallback === "broad" || !!p.all_records);
+    setIncludeOther(!!p.all_records);
+  };
+
   const retranslate = () =>
     step(useLlm ? "Asking Azure OpenAI to read the service note…" : "Applying keyword rules…", async () => {
-      const p = await api.plan(note, useLlm);
-      const on = (items) => items.map((i) => ({ ...i, on: true }));
-      setPlan({ ...p, documents: on(p.documents), observations: on(p.observations) });
-      setIncludeOther(!!p.all_records);
-      if (p.all_records) setDiscover(true);
+      adoptPlan(await api.plan(note, useLlm));
       setRun(null);
     });
 
   const fetchAll = () =>
     step("Requesting each LOINC code from Cerner…", async () => {
-      const sent = { ...plan, documents: checkedOnly(plan.documents), observations: checkedOnly(plan.observations) };
-      const order = sent.documents.map((d) => d.code);
+      const sent = {
+        ...plan,
+        documents: checkedOnly(plan.documents), observations: checkedOnly(plan.observations),
+        reports: checkedOnly(plan.reports || []), encounters: checkedOnly(plan.encounters || []),
+      };
+      const order = [...sent.documents, ...sent.reports, ...sent.encounters].map((d) => d.code);
       const byPlanOrder = (rows) => [...rows].sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
       setRun(null);
       runAbort.current = new AbortController();
@@ -258,7 +267,9 @@ export default function App() {
   };
 
   const windowOk = !applyDates || (plan && plan.start && plan.end && plan.start < plan.end);
-  const selected = plan ? plan.documents.filter((d) => d.on).length + plan.observations.filter((o) => o.on).length : 0;
+  const selected = plan
+    ? [plan.documents, plan.observations, plan.reports || [], plan.encounters || []].reduce((n, list) => n + list.filter((i) => i.on).length, 0)
+    : 0;
   const demos = demoPatientsFor(health?.fhirBase);
   const demoHint = demos.find((p) => p.id === name || (p.name === name && p.dob === dob))?.hint;
   const runPacket = packet && run && packet.runId === run.id ? packet : null;
@@ -394,19 +405,40 @@ export default function App() {
                   {plan.source === "azure-openai" ? "Mapped by Azure OpenAI" : "Mapped by keyword rules"}
                 </span>
                 <span className="chip">Measures: {plan.measures.join(", ") || "generic"}</span>
-                <span className="label">From</span>
+                {plan.intent && <span className="chip">Mode: {plan.intent.mode.replace(/_/g, " ")}</span>}
+                {plan.intent && <span className="chip" title="What happens when items are missing">Fallback: {plan.intent.fallback_strategy.replace(/_/g, " ")}</span>}
+                {plan.intent?.clinical_targets.map((t) => (
+                  <span key={t.kind} className="chip ok" title={t.any_history ? "Any date counts" : t.through ? `Through ${toUS(t.through)}` : "Within the window"}>
+                    Target: {t.kind.replace(/_/g, " ")}{t.any_history ? " (any history)" : t.through ? ` (through ${toUS(t.through)})` : ""}
+                  </span>
+                ))}
+                <button className="ghost" onClick={retranslate} disabled={!!busy || !note.trim()} title="Read the service note again">Re-translate</button>
+              </div>
+              <div className="row wrap">
+                <span className="label" title="job_envelope: the window every document, lab report and encounter search uses">Job window</span>
                 <DateInput value={plan.start} onChange={(v) => setPlan({ ...plan, start: v })} aria-label="Window start" />
                 <span className="label">to before</span>
                 <DateInput value={plan.end} onChange={(v) => setPlan({ ...plan, end: v })} aria-label="Window end (exclusive)" />
-                <button className="ghost" onClick={retranslate} disabled={!!busy || !note.trim()} title="Read the service note again">Re-translate</button>
+                {plan.intent?.date_windows.filter((w) => w.purpose === "measurement_year").map((w) => (
+                  <span key={w.purpose} className="chip" title="Results (Observation) are searched in this window">
+                    Measurement year {toUS(w.from)} – {toUS(w.to)}
+                  </span>
+                ))}
               </div>
-              {plan.notes && <p className="hint">{plan.notes}</p>}
+              {plan.notes && <p className="hint warn-text">{plan.notes}</p>}
 
               <PlanTable title="Documents (DocumentReference.type)" kind="documents" items={plan.documents}
                 options={catalog.documents} onToggle={toggle} onAdd={addCode} />
               <PlanTable title="Results (Observation.code)" kind="observations" items={plan.observations}
                 options={catalog.observations} onToggle={toggle} onAdd={addCode} />
+              {plan.reports?.length > 0 && (
+                <PlanTable title="Lab reports (DiagnosticReport.category)" kind="reports" items={plan.reports} codeLabel="Category" onToggle={toggle} />
+              )}
+              {plan.encounters?.length > 0 && (
+                <PlanTable title="Encounters (sorted by Encounter.class)" kind="encounters" items={plan.encounters} codeLabel="Group" onToggle={toggle} />
+              )}
               <p className="hint">Also requested: <b>Patient</b> (biographical sheet).</p>
+              {plan.intent && <IntentJson intent={plan.intent} />}
             </div>
           )}
         </section>
@@ -501,31 +533,49 @@ function PromptView({ prompt, onRefresh, stale }) {
   );
 }
 
-function PlanTable({ title, kind, items, options, onToggle, onAdd }) {
+function PlanTable({ title, kind, items, options, onToggle, onAdd, codeLabel = "LOINC" }) {
   return (
     <div className="plan-block">
       <h3>{title}</h3>
       {items.length === 0 ? <p className="hint">None requested.</p> : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th className="narrow"></th><th>LOINC</th><th>What</th><th>Why</th></tr></thead>
+            <thead><tr><th className="narrow"></th><th>{codeLabel}</th><th>What</th><th>Required</th><th>Why</th></tr></thead>
             <tbody>
               {items.map((i) => (
                 <tr key={i.code} className={i.on ? "" : "off"}>
                   <td><input type="checkbox" checked={i.on} onChange={() => onToggle(kind, i.code)} aria-label={`Include ${i.code}`} /></td>
-                  <td className="mono code">{i.code}</td><td>{i.label}</td><td className="muted">{i.reason}</td>
+                  <td className="mono code">{i.code}</td>
+                  <td>{i.label}</td>
+                  <td>{i.required ? <span className="chip warn">required</span> : <span className="muted small">optional</span>}</td>
+                  <td className="muted">{i.reason}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-      <select value="" onChange={(e) => onAdd(kind, e.target.value)}>
-        <option value="">+ Add a code…</option>
-        {options.filter((o) => !items.some((i) => i.code === o.code)).map((o) => (
-          <option key={o.code} value={o.code}>{o.code} · {o.label}</option>
-        ))}
-      </select>
+      {onAdd && options && (
+        <select value="" onChange={(e) => onAdd(kind, e.target.value)}>
+          <option value="">+ Add a code…</option>
+          {options.filter((o) => !items.some((i) => i.code === o.code)).map((o) => (
+            <option key={o.code} value={o.code}>{o.code} · {o.label}</option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
+// The agent's output exactly as validated (the agreed clinical-intent schema).
+function IntentJson({ intent }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="intent-json">
+      <button className="ghost small-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        {open ? "Hide agent output (JSON)" : "Agent output (JSON)"}
+      </button>
+      {open && <pre className="json">{JSON.stringify(intent, null, 2)}</pre>}
     </div>
   );
 }
@@ -665,7 +715,10 @@ function DocTab({ row, packet }) {
                         </div>
                       )}
                     </td>
-                    <td className="muted">{d.author}</td>
+                    <td className="muted">
+                      {d.author}
+                      {d.facility && <div className="small" title={`Encounter class ${d.encounterClass || "?"}`}>{d.facility}</div>}
+                    </td>
                     <td><StatusChip {...dl} /></td>
                     <td className="nowrap">
                       {d.binaryUrl
@@ -788,6 +841,50 @@ function OtherDocs({ docs, packet, picked, onToggle, locked }) {
         </table>
       </div>
       <Pager pager={pager} noun="records" />
+    </div>
+  );
+}
+
+function EncounterTab({ row }) {
+  const pager = usePager(row.docs);
+  const facilities = [...new Set(row.docs.map((v) => v.facility).filter(Boolean))];
+  return (
+    <div>
+      <div className="tab-head">
+        <div>
+          <b>{row.label}</b> {row.required && <span className="chip warn">required</span>}
+          <div className="hint">{row.count} encounters{facilities.length ? ` at ${facilities.join(", ")}` : ""}. Encounters are listed for evidence; they have no file to download.</div>
+        </div>
+      </div>
+      {row.request && (
+        <div className="request" title="The FHIR search sent to Cerner (all encounters; sorted by class here)">
+          <span className="request-verb">GET</span>
+          <code>{row.request}</code>
+        </div>
+      )}
+      {row.error && <div className="banner error small">{row.error}</div>}
+      {!row.error && row.count === 0 && <div className="banner warn">No encounters of this kind in the window.</div>}
+      {row.docs.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Start</th><th>End</th><th>Class</th><th>Type</th><th>Facility</th><th>Status</th><th>Encounter</th></tr></thead>
+            <tbody>
+              {pager.pageItems.map((v) => (
+                <tr key={v.id}>
+                  <td className="mono nowrap">{v.start ? toUS(v.start) : "—"}</td>
+                  <td className="mono nowrap">{v.end ? toUS(v.end) : "—"}</td>
+                  <td><span className="chip">{v.class || "?"}</span></td>
+                  <td>{v.type}{v.reason && <div className="muted small">{v.reason}</div>}</td>
+                  <td>{v.facility || <span className="muted">unknown</span>}</td>
+                  <td className="muted">{v.status}{v.dischargeDisposition && <div className="small">{v.dischargeDisposition}</div>}</td>
+                  <td className="mono muted">{v.id}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <Pager pager={pager} noun="encounters" />
     </div>
   );
 }
@@ -939,17 +1036,35 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
         {tab === "overview" && (
           <>
             {sweepError && <div className="banner error small">Title matching failed: {sweepError.error}</div>}
+            {r.gaps?.length > 0 && (
+              <div className="banner error gaps">
+                <div>
+                  <b>Elements not in the record (required):</b>
+                  <ul>{r.gaps.map((g) => <li key={g.purpose}>{g.notation}</li>)}</ul>
+                  {r.fallbackNote && <div className="small">{r.fallbackNote}</div>}
+                </div>
+              </div>
+            )}
+            {r.facilityWarning && (
+              <div className="banner warn">
+                <div>
+                  <b>Facility check:</b> {r.facilityWarning.message}{" "}
+                  {Object.entries(r.facilityWarning.facilities).map(([f, n]) => `${f} (${n})`).join(", ")}
+                </div>
+              </div>
+            )}
             <div className="table-wrap">
               <table>
-                <thead><tr><th>LOINC</th><th>What</th><th>Found</th><th>Latest</th></tr></thead>
+                <thead><tr><th>Code</th><th>What</th><th>Required</th><th>Found</th><th>Latest</th></tr></thead>
                 <tbody>
                   {run.progress.codes.map((c) => {
                     const row = docRows.find((x) => x.code === c.code);
-                    const latest = row?.docs.map((d) => d.date).filter(Boolean).sort().pop();
+                    const latest = row?.docs.map((d) => d.date || d.start).filter(Boolean).sort().pop();
                     return (
                       <tr key={c.code} className={`clickable ${row && row.count === 0 ? "missing" : ""}`} onClick={() => row && setTab(c.code)}>
                         <td className="mono code">{c.code}</td>
                         <td>{c.label}</td>
+                        <td>{row?.required ? <span className="chip warn">required</span> : <span className="muted small">{row ? "optional" : ""}</span>}</td>
                         <td>
                           {!row ? <span className="muted">waiting…</span>
                             : row.error ? <span className="bad" title={row.error}>error</span>
@@ -964,6 +1079,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                     <tr className="clickable" onClick={() => setTab("other")}>
                       <td className="mono code">other</td>
                       <td>Other records (not in the plan)</td>
+                      <td></td>
                       <td>
                         {r.otherError ? <span className="bad" title={r.otherError}>error</span>
                           : r.other ? `${otherDocs.length} in ${r.other.length} types` : <span className="muted">waiting…</span>}
@@ -975,6 +1091,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
                     <tr className="clickable" onClick={() => setTab("results")}>
                       <td className="mono code">results</td>
                       <td>Observations (BP / HbA1c / GMI)</td>
+                      <td>{run.plan.observations.some((o) => o.required) ? <span className="chip warn">required</span> : <span className="muted small">optional</span>}</td>
                       <td>{r.observationError ? <span className="bad">error</span> : run.done || r.observations.length ? r.observations.length : <span className="muted">waiting…</span>}</td>
                       <td className="mono">{r.observations[0] ? `${toUS(r.observations[0].date)} · ${r.observations[0].value}` : ""}</td>
                     </tr>
@@ -986,7 +1103,8 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
           </>
         )}
 
-        {current && <DocTab key={current.code} row={current} packet={packet} />}
+        {current && current.resource === "Encounter" && <EncounterTab key={current.code} row={current} />}
+        {current && current.resource !== "Encounter" && <DocTab key={current.code} row={current} packet={packet} />}
 
         {tab === "other" && <OtherTab r={r} done={run.done} packet={packet} picked={picked} onToggle={onToggleOther} />}
 

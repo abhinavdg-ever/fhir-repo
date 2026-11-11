@@ -55,30 +55,110 @@ GENERIC_DOCUMENTS = ["11506-3", "34117-2", "83805-2", "11488-4", "18842-5", "865
                      "57053-1", "34111-5", "34108-1", "18761-7", "28623-7", "28570-0", "11504-8",
                      "11502-2", "18748-4", "57133-1", "10160-0"]
 
-# (phrases found in the service note, "document" | "observation", codes)
-RULES: list[tuple[list[str], str, list[str]]] = [
-    (["inpatient admission", "admission order", "admission note"], "document", ["34117-2", "83805-2", "47039-3", "28568-4", "34111-5"]),
-    (["progress note", "telehealth"], "document", ["11506-3"]),
-    (["discharge summar"], "document", ["18842-5"]),
-    (["discharge instruction"], "document", ["8653-8"]),
-    (["medication reconcil", "medication list", "medication review"], "document", ["10183-2", "10160-0", "56445-0"]),
-    (["consultation"], "document", ["11488-4"]),
-    (["referral"], "document", ["57133-1"]),
-    (["member history"], "document", ["34117-2"]),
-    (["lab result", "laboratory record"], "document", ["11502-2"]),
-    (["nursing", "nurse note"], "document", ["28623-7"]),
-    (["emergency", "ed visit", "ed note"], "document", ["28568-4", "57053-1", "34111-5"]),
-    (["outpatient"], "document", ["34108-1"]),
-    (["transfer"], "document", ["18761-7"]),
-    (["operative", "surgical", "surgery"], "document", ["11504-8", "28570-0"]),
-    (["blood pressure"], "observation", ["85354-9", "8480-6", "8462-4"]),
-    (["hemoglobin a1c", "hba1c"], "observation", ["4548-4", "17856-6", "4549-2", "17855-8"]),
-    (["gmi"], "observation", ["97506-0"]),
+# ---- Clinical intent vocabulary (the agent's output schema) ----
+
+MODES = ["measure_specific", "all_records", "general"]
+# strict: only the plan | title_match: + Match By Doc Name | broad: + List Other Records
+# progress_notes_if_missing: when a required element is missing, also send every progress
+# note in the window and note the missing elements (as TRC service notes ask)
+FALLBACK_STRATEGIES = ["strict", "title_match", "broad", "progress_notes_if_missing"]
+DATE_WINDOW_PURPOSES = ["job_envelope", "measurement_year"]
+TARGET_KINDS = {
+    "hba1c": ["4548-4", "17856-6", "4549-2", "17855-8"],
+    "gmi": ["97506-0"],
+    "blood_pressure": ["85354-9", "8480-6", "8462-4"],
+}
+
+# resource -> purpose -> {"label", "codes"}. The agent picks purposes; the app maps them to codes.
+PURPOSES: dict[str, dict[str, dict]] = {
+    "Patient": {
+        "demographics": {"label": "Member demographics / biographical sheet", "codes": []},
+    },
+    "DocumentReference": {
+        "progress_notes": {"label": "Progress, office and telehealth visit notes", "codes": ["11506-3"]},
+        "member_history": {"label": "History and physical", "codes": ["34117-2"]},
+        "referrals_consults": {"label": "Referrals, specialist and consultation notes", "codes": ["11488-4", "57133-1", "34839-1"]},
+        "discharge_summary": {"label": "Hospital discharge summaries", "codes": ["18842-5"]},
+        "discharge_instructions": {"label": "Hospital discharge instructions", "codes": ["8653-8"]},
+        "admission": {"label": "Inpatient admission notes / evidence of admission", "codes": ["83805-2", "47039-3", "34117-2"]},
+        "emergency": {"label": "Emergency department notes", "codes": ["28568-4", "57053-1", "34111-5"]},
+        "medication_reconciliation": {"label": "Medication reconciliation, lists and reviews", "codes": ["10183-2", "10160-0", "56445-0"]},
+        "nursing": {"label": "Nursing narrative notes", "codes": ["28623-7"]},
+        "outpatient": {"label": "Outpatient / ambulatory notes", "codes": ["34108-1"]},
+        "transfer": {"label": "Transfer summaries", "codes": ["18761-7"]},
+        "procedures": {"label": "Procedure and operative notes", "codes": ["28570-0", "11504-8"]},
+        "imaging": {"label": "Diagnostic imaging reports", "codes": ["18748-4"]},
+        "lab_documents": {"label": "Laboratory report documents", "codes": ["11502-2"]},
+        "education": {"label": "Patient education notes", "codes": ["34895-3"]},
+        "wound_care": {"label": "Wound care notes", "codes": ["89821-3"]},
+        "all_clinical_notes": {"label": "All clinical notes", "codes": GENERIC_DOCUMENTS},
+    },
+    "Observation": {
+        "hba1c_or_gmi": {"label": "HbA1c / GMI results", "codes": TARGET_KINDS["hba1c"] + TARGET_KINDS["gmi"]},
+        "blood_pressure": {"label": "Blood pressure readings", "codes": TARGET_KINDS["blood_pressure"]},
+    },
+    "DiagnosticReport": {
+        "lab_report": {"label": "Laboratory reports", "codes": ["LAB"]},  # DiagnosticReport.category
+    },
+    # Encounter.class codes (v3 ActCode). Cerner ignores ?class=, so the app sorts them itself.
+    "Encounter": {
+        "inpatient_stays": {"label": "Inpatient stays (evidence of admission)", "codes": ["IMP", "ACUTE", "NONAC", "OBSENC", "SS"]},
+        "emergency_visits": {"label": "Emergency department visits", "codes": ["EMER"]},
+        "outpatient_visits": {"label": "Outpatient / ambulatory visits", "codes": ["AMB", "VR", "HH", "FLD"]},
+    },
+}
+
+# How a missing required element is written on the missing-items sheet.
+GAP_NOTATION: dict[str, str] = {
+    "admission": "Hospital stay not reported to this office (no admission documentation)",
+    "inpatient_stays": "No inpatient stay found in the record",
+    "discharge_summary": "Discharge summary not in the record",
+    "discharge_instructions": "Discharge instructions not in the record",
+    "medication_reconciliation": "Discharge medications not reconciled",
+    "progress_notes": "No progress / telehealth visit note found",
+    "referrals_consults": "No specialist consultation report in the record",
+    "lab_report": "No laboratory report found",
+    "hba1c_or_gmi": "No HbA1c / GMI result found",
+    "blood_pressure": "No blood pressure reading found",
+}
+
+# Keyword rules (used when the LLM is off): phrase in the note -> (resource, purpose).
+RULES: list[tuple[list[str], str, str]] = [
+    (["inpatient admission", "admission order", "admission note"], "DocumentReference", "admission"),
+    (["progress note", "telehealth", "office visit"], "DocumentReference", "progress_notes"),
+    (["discharge summar"], "DocumentReference", "discharge_summary"),
+    (["discharge instruction"], "DocumentReference", "discharge_instructions"),
+    (["medication reconcil", "medication list", "medication review"], "DocumentReference", "medication_reconciliation"),
+    (["consultation", "consult", "specialist", "referral"], "DocumentReference", "referrals_consults"),
+    (["member history", "history and physical"], "DocumentReference", "member_history"),
+    (["nursing", "nurse note"], "DocumentReference", "nursing"),
+    (["emergency", "ed visit", "ed note"], "DocumentReference", "emergency"),
+    (["outpatient"], "DocumentReference", "outpatient"),
+    (["inpatient", "hospital stay", "admission"], "Encounter", "inpatient_stays"),
+    (["outpatient"], "Encounter", "outpatient_visits"),
+    (["emergency", "ed visit"], "Encounter", "emergency_visits"),
+    (["transfer"], "DocumentReference", "transfer"),
+    (["operative", "surgical", "surgery", "procedure note"], "DocumentReference", "procedures"),
+    (["imaging", "radiology", "x-ray"], "DocumentReference", "imaging"),
+    (["lab result", "laboratory record", "lab report", "laboratory report"], "DiagnosticReport", "lab_report"),
+    (["blood pressure", "bp reading"], "Observation", "blood_pressure"),
+    (["hemoglobin a1c", "hba1c", "a1c", "gmi"], "Observation", "hba1c_or_gmi"),
+]
+FALLBACK_PHRASES = ["if you are not sure", "send all progress notes", "notation of the elements"]
+
+TARGET_RULES: list[tuple[list[str], str]] = [
+    (["hemoglobin a1c", "hba1c", "a1c"], "hba1c"),
+    (["gmi", "glucose management indicator"], "gmi"),
+    (["blood pressure", "bp reading"], "blood_pressure"),
 ]
 
 ALL_RECORDS_PHRASES = ["all medical records", "all records", "complete medical record", "entire medical record"]
 
 MEASURES = ["TRC", "CBP", "BPD", "GSD"]
+
+
+def purpose_info(resource: str, purpose: str) -> dict | None:
+    return PURPOSES.get(resource, {}).get(purpose)
 
 
 def doc_label(code: str) -> str:

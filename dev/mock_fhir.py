@@ -138,6 +138,60 @@ def tiny_pdf(text: str) -> bytes:
     return bytes(out)
 
 
+def encounter(id_, cls, display, facility, start, end=None, type_="Visit"):
+    return {"resourceType": "Encounter", "id": id_, "status": "finished",
+            "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": cls, "display": display},
+            "type": [{"text": type_}], "subject": {"reference": "Patient/12724066"},
+            "period": {"start": start + "T09:00:00Z", **({"end": end + "T12:00:00Z"} if end else {})},
+            "serviceProvider": {"display": facility}}
+
+
+# 97953477 is the March 2026 stay; Encounter/2 (the admission notice) is a second hospital,
+# so the one-facility check has something to flag.
+ENCOUNTERS = [
+    encounter("97953477", "IMP", "inpatient encounter", "General Hospital", "2026-03-10", "2026-03-14", "Inpatient"),
+    encounter("2", "IMP", "inpatient encounter", "City Hospital", "2026-03-11", "2026-03-12", "Inpatient"),
+    encounter("1", "AMB", "ambulatory", "Family Clinic", "2026-02-05", type_="Telehealth"),
+    encounter("3", "AMB", "ambulatory", "Family Clinic", "2026-03-20", type_="Office Visit"),
+    encounter("4", "AMB", "ambulatory", "Family Clinic", "2026-09-18", type_="Office Visit"),
+]
+
+REPORTS = [{
+    "resourceType": "DiagnosticReport", "id": "LAB1", "status": "final",
+    "category": [{"coding": [{"code": "LAB"}]}],
+    "code": {"coding": [{"system": LOINC, "code": "4548-4"}], "text": "Hemoglobin A1c"},
+    "effectiveDateTime": "2026-03-12T08:00:00Z", "performer": [{"display": "General Hospital Lab"}],
+    "presentedForm": [{"contentType": "application/pdf", "url": f"{MOCK_BASE}/Binary/XR-LAB1"}],
+}]
+
+
+def _stamp_window(params, when):
+    """Cerner-style date filter on Encounter / DiagnosticReport (values carry a time)."""
+    for k, v in params:
+        if k != "date":
+            continue
+        bound = v[2:12]
+        if v.startswith("ge") and when < bound:
+            return False
+        if v.startswith("lt") and when >= bound:
+            return False
+    return True
+
+
+@app.get("/r4/mock/Encounter")
+def encounters(request: Request):
+    params = list(request.query_params.multi_items())
+    return bundle([e for e in ENCOUNTERS if _stamp_window(params, e["period"]["start"][:10])])
+
+
+@app.get("/r4/mock/DiagnosticReport")
+def diagnostic_reports(request: Request):
+    params = list(request.query_params.multi_items())
+    category = dict(params).get("category")
+    return bundle([r for r in REPORTS if _stamp_window(params, r["effectiveDateTime"][:10])
+                   and (not category or any(c["code"] == category for x in r["category"] for c in x["coding"]))])
+
+
 @app.get("/r4/mock/Binary/{bid}")
 def binary(bid: str, request: Request):
     d = next((x for x in DOCS if f"XR-{x['id']}" == bid), None)

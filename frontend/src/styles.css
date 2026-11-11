@@ -450,6 +450,21 @@ tr.missing { background: var(--bad-bg); }
 .suggest td { vertical-align: middle; }
 .suggest .row.tight button.ghost { padding: 0.18rem 0.55rem; font-size: 0.74rem; }
 .chips.sub { margin-top: 0.25rem; }
+.intent-json { margin-top: 0.6rem; }
+pre.json {
+  margin: 0.4rem 0 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--head-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  max-height: 24rem;
+  overflow: auto;
+}
+.banner.gaps { align-items: flex-start; margin-bottom: 0.6rem; }
+.banner.gaps ul { margin: 0.25rem 0 0.3rem; padding-left: 1.1rem; }
 
 /* ---------- other records ---------- */
 .other-groups { display: flex; flex-direction: column; gap: 0.4rem; }

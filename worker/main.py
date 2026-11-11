@@ -17,9 +17,14 @@ import zipfile
 from datetime import datetime
 from urllib.parse import urlparse
 
-from agent.doc_types import DOCUMENT_CODES
+from collections import Counter
+
+from agent.doc_types import DOCUMENT_CODES, GAP_NOTATION, PURPOSES
 from common.models import Plan, RunRequest
-from worker.fhir_client import FhirClient, FhirError, doc_summary, obs_summary, patient_summary
+from worker.fhir_client import (FhirClient, FhirError, doc_summary, encounter_summary, obs_summary,
+                                patient_summary, report_summary)
+
+INPATIENT_CLASSES = set(PURPOSES["Encounter"]["inpatient_stays"]["codes"])
 
 CONCURRENCY = int(os.getenv("FHIR_CONCURRENCY", "2") or 2)  # LOINC searches in flight at once
 # Binary downloads in flight at once. Each sandbox Binary call takes ~4 s whatever its size,
@@ -124,9 +129,11 @@ async def run_job_events(c: FhirClient, req: RunRequest):
     """
     p = req.plan
     start, end = (p.start, p.end) if req.apply_dates else (None, None)
+    obs_start, obs_end = (p.obs_start, p.obs_end or p.end) if req.apply_dates else (None, None)
+    fallback = p.intent.fallback_strategy if p.intent else "strict"
     patient = patient_summary(await c.get_patient(req.patient_id))
     yield {"type": "start", "patient": patient, "window": {"start": start, "end": end},
-           "codes": [{"code": i.code, "label": i.label} for i in p.documents],
+           "codes": [{"code": i.code, "label": i.label} for i in [*p.documents, *p.reports, *p.encounters]],
            "observations": bool(p.observations), "titleSweep": bool(req.title_fallback and p.documents)}
 
     sem = asyncio.Semaphore(max(1, CONCURRENCY))
@@ -153,12 +160,106 @@ async def run_job_events(c: FhirClient, req: RunRequest):
             seen.add(s["id"])
             summaries.append(s)
         row = {"code": item.code, "label": item.label, "reason": item.reason,
+               "group": item.group, "required": item.required, "resource": "DocumentReference",
                "count": len(summaries), "error": err, "docs": summaries,
                "truncated": getattr(raw, "truncated", False), "request": getattr(raw, "request_url", "")}
         rows_by_code[item.code] = row
         yield {"type": "row", "row": row}
 
-    rows = [rows_by_code[i.code] for i in p.documents]  # back in plan order
+    # Lab reports (DiagnosticReport), one search per category.
+    for item in p.reports:
+        row = {"code": item.code, "label": item.label, "reason": item.reason, "group": item.group,
+               "required": item.required, "resource": "DiagnosticReport", "error": None, "docs": []}
+        try:
+            found = await c.diagnostic_reports(req.patient_id, item.code, start, end)
+            row.update(truncated=getattr(found, "truncated", False), request=getattr(found, "request_url", ""))
+            for r in found:
+                if r.get("status") == "entered-in-error":
+                    continue
+                s = report_summary(r)
+                s.update(matchedBy="report", duplicate=False, file=file_name(s, "Lab-report"))
+                row["docs"].append(s)
+        except FhirError as e:
+            row["error"] = str(e)
+        row["count"] = len(row["docs"])
+        rows_by_code[item.code] = row
+        yield {"type": "row", "row": row}
+
+    # Encounters: one search, sorted into the requested classes; also gives each note its facility.
+    encounters_by_id: dict[str, dict] = {}
+    if p.encounters:
+        enc_error, enc_request, enc_truncated = None, "", False
+        try:
+            found = await c.encounters(req.patient_id, start, end)
+            enc_request, enc_truncated = getattr(found, "request_url", ""), getattr(found, "truncated", False)
+            for e in found:
+                if e.get("status") != "entered-in-error":
+                    encounters_by_id[e.get("id")] = encounter_summary(e)
+        except FhirError as e:
+            enc_error = str(e)
+        for item in p.encounters:
+            classes = set(PURPOSES["Encounter"].get(item.code, {}).get("codes", []))
+            visits = sorted((v for v in encounters_by_id.values() if v["class"] in classes),
+                            key=lambda v: v["start"] or "", reverse=True)
+            row = {"code": item.code, "label": item.label, "reason": item.reason, "group": item.group,
+                   "required": item.required, "resource": "Encounter", "error": enc_error,
+                   "docs": visits, "count": len(visits), "truncated": enc_truncated, "request": enc_request}
+            rows_by_code[item.code] = row
+            yield {"type": "row", "row": row}
+
+    rows = [rows_by_code[i.code] for i in [*p.documents, *p.reports, *p.encounters]]  # back in plan order
+
+    # Facility of each note (from its encounter), and the one-facility check for inpatient notes.
+    facility_warning = None
+    if encounters_by_id:
+        inpatient_facilities: Counter = Counter()
+        for row in rows:
+            if row["resource"] == "Encounter":
+                continue
+            for d in row["docs"]:
+                ref = (d.get("encounter") or "").split(",")[0].strip()
+                enc = encounters_by_id.get(ref.rsplit("/", 1)[-1]) if ref else None
+                if enc:
+                    d["facility"], d["encounterClass"] = enc["facility"], enc["class"]
+                    if enc["class"] in INPATIENT_CLASSES and enc["facility"] and not d.get("duplicate"):
+                        inpatient_facilities[enc["facility"]] += 1
+        if len(inpatient_facilities) > 1:
+            facility_warning = {"facilities": dict(inpatient_facilities.most_common()),
+                                "message": "Inpatient notes come from more than one facility; the request asks for one facility per record."}
+
+    # Required elements with nothing found, and the progress-notes fallback.
+    def gaps_so_far() -> list[dict]:
+        found_by_group: Counter = Counter()
+        required_groups: dict[str, str] = {}
+        for row in rows:
+            if row.get("required"):
+                required_groups[row["group"]] = row["resource"]
+            found_by_group[row["group"]] += row["count"]
+        return [{"resource": res, "purpose": g, "notation": GAP_NOTATION.get(g, f"No {g.replace('_', ' ')} found")}
+                for g, res in required_groups.items() if g and not found_by_group[g]]
+
+    gaps = gaps_so_far()
+    fallback_note = None
+    if fallback == "progress_notes_if_missing" and gaps:
+        fallback_note = "Required elements are missing, so every progress note in the window is included (fallback)."
+        if "11506-3" not in rows_by_code:
+            from common.models import PlanItem
+            extra = PlanItem(code="11506-3", label=DOCUMENT_CODES["11506-3"]["label"],
+                             reason="fallback: all progress notes because required elements are missing",
+                             group="progress_notes")
+            item, docs, err, raw = await by_code(extra)
+            summaries = []
+            for d in docs:
+                s = doc_summary(d)
+                s.update(matchedBy="loinc", duplicate=s["id"] in seen, file=file_name(s, extra.label))
+                seen.add(s["id"])
+                summaries.append(s)
+            row = {"code": extra.code, "label": extra.label, "reason": extra.reason, "group": extra.group,
+                   "required": False, "resource": "DocumentReference", "count": len(summaries), "error": err,
+                   "docs": summaries, "truncated": getattr(raw, "truncated", False), "request": getattr(raw, "request_url", "")}
+            rows_by_code[extra.code] = row
+            rows.append(row)
+            yield {"type": "row", "row": row}
 
     # One search for everything the patient has: notes no plan code found are either
     # matched to a plan code by title, or listed as "other records" (not downloaded).
@@ -207,7 +308,7 @@ async def run_job_events(c: FhirClient, req: RunRequest):
     observations, obs_error, obs_truncated = [], None, False
     if p.observations:
         try:
-            obs = await c.observations(req.patient_id, [o.code for o in p.observations], start, end)
+            obs = await c.observations(req.patient_id, [o.code for o in p.observations], obs_start, obs_end)
             observations = sorted((obs_summary(o) for o in obs), key=lambda o: o["date"], reverse=True)
             obs_truncated = getattr(obs, "truncated", False)
         except FhirError as e:
@@ -215,8 +316,17 @@ async def run_job_events(c: FhirClient, req: RunRequest):
         yield {"type": "observations", "observations": observations, "observationError": obs_error,
                "observationsTruncated": obs_truncated}
 
+    # Results that were required but not found.
+    for group in {o.group for o in p.observations if o.required}:
+        if not observations and not obs_error:
+            gaps.append({"resource": "Observation", "purpose": group,
+                         "notation": GAP_NOTATION.get(group, f"No {group.replace('_', ' ')} found")})
+
     yield {"type": "done", "result": {
         "patient": patient, "window": {"start": start, "end": end},
+        "obsWindow": {"start": obs_start, "end": obs_end},
+        "gaps": gaps, "facilityWarning": facility_warning, "fallbackNote": fallback_note,
+        "intent": p.intent.model_dump(by_alias=True) if p.intent else None,
         "rows": rows, "observations": observations, "observationError": obs_error,
         "observationsTruncated": obs_truncated,
         "other": other_groups, "otherError": other_info["error"], "otherTruncated": other_info["truncated"],
@@ -248,19 +358,44 @@ def bio_sheet(pt: dict) -> str:
 def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
     w = result.get("window") or {}
     window = f"{us_date(w['start'])} to before {us_date(w['end'])}" if w.get("start") else "no date filter"
+    intent = plan.intent
     lines = [f"Member: {pt.get('name', '')} | DOB {us_date(pt.get('birthDate'))} | Patient/{pt.get('id', '')}",
-             f"Measures: {', '.join(plan.measures) or 'generic'} | Window: {window}", ""]
+             f"Measures: {', '.join(plan.measures) or 'generic'} | Window: {window}"
+             + (f" | Mode: {intent.mode} | Fallback: {intent.fallback_strategy}" if intent else ""), ""]
+
+    gaps = result.get("gaps") or []
+    if gaps:
+        lines.append("ELEMENTS NOT IN THE RECORD (required):")
+        lines += [f"  - {g.get('notation')}" for g in gaps]
+        lines.append("")
+    if result.get("fallbackNote"):
+        lines += [result["fallbackNote"], ""]
+    fw = result.get("facilityWarning")
+    if fw:
+        lines.append(f"FACILITY CHECK: {fw.get('message')}")
+        lines += [f"  - {name}: {n} inpatient notes" for name, n in (fw.get("facilities") or {}).items()]
+        lines.append("")
+
     for r in result.get("rows", []):
         if r.get("extra"):  # other records the reviewer added to the packet
             lines.append(f"  {r.get('label')}: {r.get('count', 0)} added to this packet")
             continue
+        tag = " [required]" if r.get("required") else ""
         if r.get("error"):
             status = f"ERROR: {r['error']}"
         elif r.get("count"):
             status = f"{r['count']} found" + (" (more exist; raise FHIR_MAX_PAGES or narrow the window)" if r.get("truncated") else "")
         else:
             status = "NOT in this record"
-        lines.append(f"  {r.get('label')} (LOINC {r.get('code')}): {status}")
+        resource = r.get("resource", "DocumentReference")
+        if resource == "Encounter":
+            facilities = Counter(v.get("facility") or "unknown facility" for v in r.get("docs", []))
+            where = "; ".join(f"{n} at {f}" for f, n in facilities.most_common())
+            lines.append(f"  {r.get('label')}{tag}: {status}" + (f" ({where})" if r.get("count") else ""))
+        elif resource == "DiagnosticReport":
+            lines.append(f"  {r.get('label')} (category {r.get('code')}){tag}: {status}")
+        else:
+            lines.append(f"  {r.get('label')} (LOINC {r.get('code')}){tag}: {status}")
     other = result.get("other") or []
     if other or result.get("otherError"):
         added = {d.get("id") for r in result.get("rows", []) if r.get("extra") for d in r.get("docs", [])}
@@ -284,7 +419,8 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
                       "(check it isn't an ED, inpatient or procedure-day reading)")
         else:
             latest = "NONE found"
-        lines += ["", f"  Results ({codes}): {latest}"]
+        tag = " [required]" if any(o.required for o in plan.observations) else ""
+        lines += ["", f"  Results ({codes}){tag}: {latest}"]
     return "\n".join(lines) + "\n"
 
 
