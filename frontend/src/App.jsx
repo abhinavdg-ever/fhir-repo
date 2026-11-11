@@ -442,15 +442,15 @@ export default function App() {
           <div className="row wrap">
             <label className="check">
               <input type="checkbox" checked={applyDates} onChange={(e) => setApplyDates(e.target.checked)} />
-              Apply date window
+              Apply Date Window
             </label>
             <label className="check">
               <input type="checkbox" checked={titleFallback} onChange={(e) => setTitleFallback(e.target.checked)} />
-              Also match notes by title, close matches included (catches notes with no LOINC)
+              <span title="Catches notes with no LOINC code by their name; close matches count">Match By Doc Name</span>
             </label>
             <label className="check">
               <input type="checkbox" checked={discover} onChange={(e) => { setDiscover(e.target.checked); if (!e.target.checked) setIncludeOther(false); }} />
-              List the member's other records (“Not downloaded”)
+              <span title="Lists every other record the member has as “Not downloaded”">List Other Records</span>
             </label>
             <label className="check" title="On automatically when the service note asks for all medical records">
               <input type="checkbox" checked={includeOther} disabled={!discover} onChange={(e) => setIncludeOther(e.target.checked)} />
@@ -460,8 +460,8 @@ export default function App() {
               Fetch ({selected} codes)
             </button>
           </div>
-          {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply date window”.</p>}
-          <p className="hint">Sandbox data is often older than the request window — untick “Apply date window” if nothing comes back.</p>
+          {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply Date window”.</p>}
+          <p className="hint">Sandbox data is often older than the request window — untick “Apply Date Window” if nothing comes back.</p>
           {health?.fhirMaxRps > 0 && (
             <p className="hint">Requests to Cerner are spaced out: at most {health.fhirMaxRps}/s, {health.fhirConcurrency} codes at a time, with automatic retry when Cerner throttles.</p>
           )}

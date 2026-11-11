@@ -162,8 +162,8 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 `FHIR_BASE` defaults to the open sandbox `https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d` (no auth).
 
 - Type `12724066` in the patient box to load that test patient. A name search needs the date of birth too, as mm/dd/yyyy (e.g. `Tim Peters` + 09/15/1990). Dates in the UI and packet sheets are mm/dd/yyyy.
-- Sandbox notes are often outside the window — untick **Apply date window**.
-- Tick **Also match notes by title** to catch notes with no LOINC on `type`.
+- Sandbox notes are often outside the window — untick **Apply Date Window**.
+- Tick **Match By Doc Name** to catch notes with no LOINC on `type`.
 - `Binary` only accepts the file's own media type or `application/fhir+json` in `Accept`; anything else (e.g. a browser's `*/*`) gets **406 "The Accept Header is invalid"**. The app sends the exact type and falls back to FHIR JSON, so open notes through **Open** (which goes via `/api/binary`), not by pasting the Binary URL into a browser.
 - The open sandbox rate-limits (HTTP 429). Requests are spaced out and retried automatically; tune it in `.env`:
 
@@ -182,9 +182,9 @@ The packet is a background job: each note's file is a separate `GET Binary/{id}`
 
 **Document types.** `agent/doc_types.py` lists 24 document LOINC codes, including the ones Cerner actually puts on notes (e.g. `83805-2` admission note, `28623-7` nursing narrative, `28568-4` / `57053-1` ED physician / nurse, `34108-1` outpatient, `18761-7` transfer summary, `11504-8` operative report). Title keywords include Cerner's own titles ("Inpatient Clinical Summary" is a discharge summary).
 
-**Title matching** (optional) catches notes Cerner never coded with LOINC: exact keyword hits score 1.0, and close titles ("Nursing Narr", "Discharge Sumary") match on similarity (`TITLE_MATCH_MIN`, default 0.82) and show as *close title match NN%*. Notes that have a different LOINC code are not pulled in by title.
+**Match By Doc Name** (optional) catches notes Cerner never coded with LOINC: exact keyword hits score 1.0, and close titles ("Nursing Narr", "Discharge Sumary") match on similarity (`TITLE_MATCH_MIN`, default 0.82) and show as *close title match NN%*. Notes that have a different LOINC code are not pulled in by title.
 
-**Other records** (off by default; tick *List the member's other records*). Fetch then also runs one search for every record the member has (`DocumentReference?patient=…`, no type) and lists everything the plan didn't cover in the **Other records** tab, grouped by type, as **Not downloaded**. Tick a record or a whole type to add it to the packet. When the service note asks for **all medical records**, every other record goes in the packet automatically (the plan codes plus everything else); the missing-items sheet lists what was left out.
+**Other records** (off by default; tick **List Other Records**). Fetch then also runs one search for every record the member has (`DocumentReference?patient=…`, no type) and lists everything the plan didn't cover in the **Other records** tab, grouped by type, as **Not downloaded**. Tick a record or a whole type to add it to the packet. When the service note asks for **all medical records**, every other record goes in the packet automatically (the plan codes plus everything else); the missing-items sheet lists what was left out.
 
 The **API trace** panel at the bottom lists every call for the current request — the browser's calls to this app and the backend's calls to Cerner (status, time, retries). It clears with each new request; **Start over** at the top resets everything.
 
