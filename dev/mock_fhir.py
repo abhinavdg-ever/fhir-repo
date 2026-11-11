@@ -7,12 +7,15 @@ Shapes follow Cerner's (code set 72 + optional LOINC on DocumentReference.type,
 Binary links in content.attachment.url). All data is made up.
 """
 import base64
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 app = FastAPI()
 CS72 = "https://fhir.cerner.com/mock/codeSet/72"
+# Base URL written into Binary links; in Docker compose it is http://mock:9000/r4/mock.
+MOCK_BASE = os.getenv("MOCK_BASE_URL", "http://localhost:9000/r4/mock").rstrip("/")
 LOINC = "http://loinc.org"
 
 PATIENT = {
@@ -36,7 +39,7 @@ def doc(id_, title, local, loinc, when, author, enc):
             "author": [{"display": author}],
             "context": {"encounter": [{"reference": enc}], "period": {"start": when + "T10:00:00Z"}},
             "content": [{"attachment": {"contentType": "application/pdf",
-                                        "url": f"http://localhost:9000/r4/mock/Binary/XR-{id_}"}}]}
+                                        "url": f"{MOCK_BASE}/Binary/XR-{id_}"}}]}
 
 
 DOCS = [

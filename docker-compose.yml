@@ -1,0 +1,42 @@
+# Deploy on a VM:
+#   cp .env.example .env      # then add AOAI_ENDPOINT / AOAI_API_KEY
+#   docker compose up -d --build
+#   open http://<vm-ip>:1000
+#
+# Change the public port with HOST_PORT, e.g.  HOST_PORT=8080 docker compose up -d
+
+services:
+  app:
+    build: .
+    image: fhir-record-retrieval:latest
+    container_name: fhir-record-retrieval
+    # The app reads .env itself (python-dotenv, same as running locally), so inline
+    # comments in .env work. Create .env before the first `up`, or Docker makes a folder.
+    volumes:
+      - ./.env:/app/.env:ro
+    environment:
+      # The container always listens on 8000; HOST_PORT is what the VM exposes.
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+    ports:
+      - "${HOST_PORT:-1000}:8000"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional offline Cerner stand-in:
+  #   docker compose --profile mock up -d --build
+  # and set FHIR_BASE=http://mock:9000/r4/mock in .env
+  mock:
+    profiles: ["mock"]
+    build: .
+    image: fhir-record-retrieval:latest
+    command: ["python", "-m", "uvicorn", "dev.mock_fhir:app", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      MOCK_BASE_URL: http://mock:9000/r4/mock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/r4/mock/Patient/1', timeout=4)"]
+    restart: unless-stopped

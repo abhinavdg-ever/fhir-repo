@@ -34,6 +34,34 @@ requirements.txt
 .env.example
 ```
 
+## Deploy with Docker (VM)
+
+One container serves the API and the UI. Needs Docker with the compose plugin on the VM.
+
+```bash
+git clone https://github.com/abhinavdg-ever/fhir-repo.git && cd fhir-repo
+cp .env.example .env            # then set AOAI_ENDPOINT, AOAI_DEPLOYMENT, AOAI_API_KEY
+docker compose up -d --build
+```
+
+Open **http://<vm-ip>:1000**. Other port: `HOST_PORT=8080 docker compose up -d`.
+
+| Task | Command |
+| --- | --- |
+| Logs | `docker compose logs -f app` |
+| Connectivity check inside the container | `docker compose exec app python -m dev.check` |
+| Update to the latest code | `git pull && docker compose up -d --build` |
+| Apply `.env` changes | `docker compose restart app` |
+| Stop | `docker compose down` |
+| Offline mock instead of Cerner | set `FHIR_BASE=http://mock:9000/r4/mock` in `.env`, then `docker compose --profile mock up -d --build` |
+
+Notes:
+
+- `.env` is mounted read-only into the container (not baked into the image) and read by the app, so inline comments work. Create it **before** the first `up`, otherwise Docker creates an empty folder named `.env`.
+- Open the port in the VM firewall / cloud security group (e.g. `sudo ufw allow 1000/tcp`).
+- The container runs **one** uvicorn worker on purpose: packet jobs, the API trace and the Cerner rate limiter are in memory.
+- Behind a corporate proxy, add `HTTPS_PROXY=http://proxy:port` and `NO_PROXY=localhost,127.0.0.1,mock` to `.env`.
+
 ## Run it
 
 Needs **Python 3.10+**. Node is only needed to change the UI — the built UI in `frontend/dist` is committed and served by the API.
