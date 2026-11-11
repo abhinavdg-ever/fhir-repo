@@ -180,10 +180,11 @@ h3 {
 .bad { color: var(--bad-fg); font-weight: 600; }
 .warn-text { color: var(--warn-fg); }
 input.invalid { border-color: var(--warn-fg); }
+.date-input { width: 8.5rem; font-family: var(--font-mono); font-size: 0.85rem; }
 .grow { flex: 1 1 14rem; min-width: 0; }
 
 /* ---------- controls ---------- */
-input[type="text"], input:not([type]), input[type="date"], select, textarea {
+input[type="text"], input:not([type]), select, textarea {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;

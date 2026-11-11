@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "./api.js";
+import { DateInput, toUS } from "./dates.jsx";
 
 const SAMPLES = {
   TRC: "TRC - REQUIRED - Member demographic sheet: Name and date of birth, 2026 Evidence of discharge medication reconciliations, medication lists and medication reviews, 2026 Hospital discharge summaries, 2026 Hospital discharge instructions, 2026 Documentation of notification of inpatient admissions or evidence of admission orders, 2026 Specialist consultation reports, 2026 Progress notes and telehealth's. Require inpatient and outpatient records. Note: Inpatient notes should be only from one facility per record.",
@@ -112,6 +113,7 @@ export default function App() {
   const isPatientId = /^\d+$/.test(name.trim());
   const needsDob = name.trim() !== "" && !isPatientId && !dob;
   const canSearch = !busy && name.trim() !== "" && !needsDob;
+  const windowOk = !applyDates || (plan && plan.start && plan.end && plan.start < plan.end);
   const selected = plan ? plan.documents.filter((d) => d.on).length + plan.observations.filter((o) => o.on).length : 0;
 
   return (
@@ -174,9 +176,9 @@ export default function App() {
                 </span>
                 <span className="chip">Measures: {plan.measures.join(", ") || "generic"}</span>
                 <span className="label">From</span>
-                <input type="date" value={plan.start} onChange={(e) => setPlan({ ...plan, start: e.target.value })} />
+                <DateInput value={plan.start} onChange={(v) => setPlan({ ...plan, start: v })} aria-label="Window start" />
                 <span className="label">to before</span>
-                <input type="date" value={plan.end} onChange={(e) => setPlan({ ...plan, end: e.target.value })} />
+                <DateInput value={plan.end} onChange={(v) => setPlan({ ...plan, end: v })} aria-label="Window end (exclusive)" />
               </div>
               {plan.notes && <p className="hint">{plan.notes}</p>}
 
@@ -210,14 +212,15 @@ export default function App() {
             <input className="grow" placeholder="Patient name or Patient ID" value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && canSearch && findPatients()} />
-            <input type="date" value={dob} onChange={(e) => setDob(e.target.value)}
+            <DateInput value={dob} onChange={setDob} aria-label="Date of birth"
               className={needsDob ? "invalid" : ""} aria-invalid={needsDob} required={!isPatientId}
+              onKeyDown={(e) => e.key === "Enter" && canSearch && findPatients()}
               title={isPatientId ? "Date of birth (optional with a Patient ID)" : "Date of birth (required with a name)"} />
             <button className="primary" onClick={() => findPatients()} disabled={!canSearch}>Search</button>
           </div>
           <p className={`hint ${needsDob ? "warn-text" : ""}`}>
             {needsDob
-              ? "Date of birth is required when searching by name."
+              ? "Date of birth (mm/dd/yyyy) is required when searching by name."
               : "Search by Patient ID, or by name + date of birth."}
           </p>
           {patients && patients.length === 0 && <p className="hint">No patients found.</p>}
@@ -229,7 +232,7 @@ export default function App() {
                   {patients.map((p) => (
                     <tr key={p.id} className={`clickable ${p.id === patientId ? "picked" : ""}`} onClick={() => setPatientId(p.id)}>
                       <td><input type="radio" name="patient" checked={p.id === patientId} onChange={() => setPatientId(p.id)} /></td>
-                      <td>{p.name}</td><td className="mono">{p.birthDate}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
+                      <td>{p.name}</td><td className="mono">{toUS(p.birthDate)}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -249,10 +252,11 @@ export default function App() {
               <input type="checkbox" checked={titleFallback} onChange={(e) => setTitleFallback(e.target.checked)} />
               Also match notes by title (catches notes with no LOINC)
             </label>
-            <button className="primary" onClick={fetchAll} disabled={!!busy || !plan || !patientId || selected === 0}>
+            <button className="primary" onClick={fetchAll} disabled={!!busy || !plan || !patientId || selected === 0 || !windowOk}>
               Fetch &amp; download ({selected} codes)
             </button>
           </div>
+          {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply date window”.</p>}
           <p className="hint">Sandbox data is often older than the request window — untick “Apply date window” if nothing comes back.</p>
 
           {run && <Results r={run.result} onPacket={downloadPacket} busy={!!busy} />}
@@ -298,13 +302,13 @@ function Results({ r, onPacket, busy }) {
     <div className="results">
       <div className="summary">
         <div className="summary-text">
-          <div><b>{r.patient.name}</b> · DOB {r.patient.birthDate} · Patient/{r.patient.id}</div>
+          <div><b>{r.patient.name}</b> · DOB {toUS(r.patient.birthDate)} · Patient/{r.patient.id}</div>
           <div className="stats">
             <span className="stat"><span className="stat-value">{notes.length}</span> notes</span>
             <span className="stat-divider" />
             <span className="stat"><span className={`stat-value ${r.missing.length ? "bad" : ""}`}>{r.missing.length}</span> codes missing</span>
             <span className="stat-divider" />
-            <span className="stat mono">{r.window.start ? `${r.window.start} → before ${r.window.end}` : "no date filter"}</span>
+            <span className="stat mono">{r.window.start ? `${toUS(r.window.start)} → before ${toUS(r.window.end)}` : "no date filter"}</span>
           </div>
         </div>
         <button className="primary" onClick={onPacket} disabled={busy}>Download packet (.zip)</button>
@@ -324,7 +328,7 @@ function Results({ r, onPacket, busy }) {
                   {row.error && <div className="bad small">{row.error}</div>}
                   {row.docs.map((d) => (
                     <div key={d.id + row.code} className="doc">
-                      <span className="mono">{d.date || "undated"}</span>
+                      <span className="mono">{d.date ? toUS(d.date) : "undated"}</span>
                       <b>{d.title || "(untitled)"}</b>
                       {d.author && <span className="muted">{d.author}</span>}
                       {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
@@ -355,7 +359,7 @@ function Results({ r, onPacket, busy }) {
                 <tbody>
                   {r.observations.map((o, i) => (
                     <tr key={o.id} className={i === 0 ? "picked" : ""}>
-                      <td className="mono">{o.date}</td><td>{o.name}</td><td><b>{o.value}</b></td><td>{o.performer}</td>
+                      <td className="mono">{toUS(o.date)}</td><td>{o.name}</td><td><b>{o.value}</b></td><td>{o.performer}</td>
                     </tr>
                   ))}
                 </tbody>

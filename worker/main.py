@@ -25,6 +25,13 @@ EXT = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "
        "image/tiff": "tif"}
 
 
+def us_date(iso: str | None) -> str:
+    """YYYY-MM-DD -> MM/DD/YYYY for the human-readable sheets (file names stay ISO so they sort)."""
+    if iso and len(iso) >= 10 and iso[4] == "-" and iso[7] == "-":
+        return f"{iso[5:7]}/{iso[8:10]}/{iso[:4]}"
+    return iso or ""
+
+
 def safe(s: str, limit: int = 60) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", s or "").strip("-")[:limit]
 
@@ -115,18 +122,18 @@ async def handle_job(c: FhirClient, req: RunRequest) -> dict:
 
 def bio_sheet(pt: dict) -> str:
     lines = ["MEMBER BIOGRAPHICAL INFORMATION SHEET", "",
-             f"Name:          {pt.get('name', '')}", f"Date of birth: {pt.get('birthDate', '')}",
+             f"Name:          {pt.get('name', '')}", f"Date of birth: {us_date(pt.get('birthDate'))}",
              f"Sex:           {pt.get('gender', '')}", f"Address:       {pt.get('address', '')}",
              f"Phone:         {pt.get('phone', '')}", f"Patient ID:    {pt.get('id', '')}"]
     lines += [f"Identifier:    {i}" for i in pt.get("identifiers", [])]
-    lines += ["", f"Generated {datetime.now():%Y-%m-%d %H:%M} from FHIR Patient/{pt.get('id', '')}"]
+    lines += ["", f"Generated {datetime.now():%m/%d/%Y %H:%M} from FHIR Patient/{pt.get('id', '')}"]
     return "\n".join(lines) + "\n"
 
 
 def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
     w = result.get("window") or {}
-    window = f"{w['start']} to before {w['end']}" if w.get("start") else "no date filter"
-    lines = [f"Member: {pt.get('name', '')} | DOB {pt.get('birthDate', '')} | Patient/{pt.get('id', '')}",
+    window = f"{us_date(w['start'])} to before {us_date(w['end'])}" if w.get("start") else "no date filter"
+    lines = [f"Member: {pt.get('name', '')} | DOB {us_date(pt.get('birthDate'))} | Patient/{pt.get('id', '')}",
              f"Measures: {', '.join(plan.measures) or 'generic'} | Window: {window}", ""]
     for r in result.get("rows", []):
         if r.get("error"):
@@ -142,7 +149,7 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
         if result.get("observationError"):
             latest = f"ERROR: {result['observationError']}"
         elif obs:
-            latest = (f"latest {obs[0].get('value')} on {obs[0].get('date')} "
+            latest = (f"latest {obs[0].get('value')} on {us_date(obs[0].get('date'))} "
                       "(check it isn't an ED, inpatient or procedure-day reading)")
         else:
             latest = "NONE found"

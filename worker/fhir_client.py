@@ -58,10 +58,24 @@ class FhirClient:
         name = name.strip()
         if name.isdigit():  # a Patient ID was typed
             return [await self.get_json(f"Patient/{name}")]
-        params = [("name", name), ("_count", "20")]
+        params = [*self._name_params(name), ("_count", "20")]
         if birthdate:
             params.append(("birthdate", birthdate))
         return await self.search("Patient", params, max_pages=1)
+
+    @staticmethod
+    def _name_params(name: str) -> list[tuple[str, str]]:
+        """Cerner's `name` matches one word, so split full names into family + given.
+        "Peters, Tim" and "Tim Peters" -> family=Peters, given=Tim; one word -> name=..."""
+        if "," in name:
+            family, given = (part.strip() for part in name.split(",", 1))
+        else:
+            words = name.split()
+            if len(words) < 2:
+                return [("name", name)]
+            given, family = words[0], words[-1]
+        params = [("family", family)] if family else []
+        return params + ([("given", given)] if given else [])
 
     async def get_patient(self, pid: str) -> dict:
         return await self.get_json(f"Patient/{pid}")

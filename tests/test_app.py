@@ -36,3 +36,17 @@ def test_patient_name_search_requires_dob():
     r = client.get("/api/patients", params={"name": "jane"})
     assert r.status_code == 400
     assert "Date of birth" in r.json()["detail"]
+
+
+def test_full_names_split_into_family_and_given():
+    from worker.fhir_client import FhirClient
+    split = FhirClient._name_params
+    assert split("Peters, Tim") == [("family", "Peters"), ("given", "Tim")]
+    assert split("Tim Peters") == [("family", "Peters"), ("given", "Tim")]
+    assert split("peters") == [("name", "peters")]
+
+
+def test_sheets_use_us_dates():
+    from worker.main import bio_sheet, us_date
+    assert us_date("1990-09-15") == "09/15/1990"
+    assert "Date of birth: 09/15/1990" in bio_sheet({"birthDate": "1990-09-15"})
