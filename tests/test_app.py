@@ -150,7 +150,7 @@ def test_run_stream_emits_progress_then_done(monkeypatch):
     monkeypatch.setattr(worker_main.FhirClient, "documents_by_loinc", fake_docs)
     plan = {"start": "2026-01-01", "end": "2026-11-12", "documents": [
         {"code": "18842-5", "label": "Discharge summary"}, {"code": "8653-8", "label": "Hospital discharge instructions"}]}
-    r = client.post("/api/run/stream", json={"patient_id": "1", "plan": plan})
+    r = client.post("/api/run/stream", json={"patient_id": "1", "plan": plan, "discover": False})
     events = [json.loads(line) for line in r.text.splitlines()]
     assert [e["type"] for e in events] == ["start", "row", "row", "done"]
     result = events[-1]["result"]
@@ -296,3 +296,54 @@ def test_binary_accept_is_never_a_wildcard(monkeypatch):
     assert (data, calls) == (b"hi", ["application/fhir+json"])
     (data, ctype), calls = asyncio.run(go("application/rtf"))  # refused -> falls back to FHIR JSON
     assert (data, calls) == (b"hi", ["application/rtf", "application/fhir+json"])
+
+
+def test_title_scores_exact_close_and_unrelated():
+    from worker.main import best_title_match, title_score
+    assert title_score("Nursing Narrative Note", "28623-7") == 1.0
+    assert 0.82 <= title_score("Nursing Narr", "28623-7") < 1.0
+    assert best_title_match("Discharge Sumary", ["18842-5", "11506-3"])[0] == "18842-5"
+    assert best_title_match("Inpatient Clinical Summary", ["18842-5"])[0] == "18842-5"
+    assert best_title_match("Care Plan- Self Care Plan", ["18842-5", "11506-3", "28623-7"])[0] is None
+
+
+def test_run_groups_other_records_and_matches_titles(monkeypatch):
+    import json
+
+    from worker import main as worker_main
+
+    def doc(id_, title, loinc=None):
+        coding = [{"system": "http://loinc.org", "code": loinc}] if loinc else [{"system": "https://x/codeSet/72", "code": "99"}]
+        return {"resourceType": "DocumentReference", "id": id_, "status": "current",
+                "type": {"text": title, "coding": coding}, "date": "2026-03-01T00:00:00Z",
+                "content": [{"attachment": {"contentType": "application/pdf", "url": f"https://h.cerner.com/r4/t/Binary/XR-{id_}"}}]}
+
+    async def fake_patient(self, pid):
+        return {"resourceType": "Patient", "id": pid, "name": [{"text": "Doe, Jane"}]}
+
+    async def fake_docs(self, pid, code, start, end):
+        return [doc("1", "Discharge Summary", "18842-5")] if code == "18842-5" else []
+
+    async def fake_all(self, pid, start, end):
+        return [doc("1", "Discharge Summary", "18842-5"),       # already found by LOINC
+                doc("2", "Nursing Narr"),                       # close title match -> nursing row
+                doc("6", "Wound Care Progress Note", "89821-3"),  # has its own LOINC -> other, not progress
+                doc("3", "Admission Note Physician", "83805-2"),  # other record, known code
+                doc("4", "Admission Note Physician", "83805-2"),
+                doc("5", "Care Plan- Self Care Plan")]          # other record, local code
+
+    monkeypatch.setattr(worker_main.FhirClient, "get_patient", fake_patient)
+    monkeypatch.setattr(worker_main.FhirClient, "documents_by_loinc", fake_docs)
+    monkeypatch.setattr(worker_main.FhirClient, "documents_all", fake_all)
+    plan = {"start": "2026-01-01", "end": "2026-11-12", "documents": [
+        {"code": "18842-5", "label": "Discharge summary"}, {"code": "28623-7", "label": "Nursing narrative note"},
+        {"code": "11506-3", "label": "Progress note"}]}
+    r = client.post("/api/run/stream", json={"patient_id": "1", "plan": plan, "title_fallback": True, "discover": True})
+    events = [json.loads(line) for line in r.text.splitlines()]
+    assert [e["type"] for e in events] == ["start", "row", "row", "row", "sweep", "other", "done"]
+    result = events[-1]["result"]
+    nursing = next(r for r in result["rows"] if r["code"] == "28623-7")
+    assert [(d["id"], d["matchedBy"]) for d in nursing["docs"]] == [("2", "title")] and nursing["docs"][0]["matchScore"] < 1
+    groups = {g["key"]: g["count"] for g in result["other"]}
+    assert groups["83805-2"] == 2 and groups["89821-3"] == 1 and sum(groups.values()) == 4
+    assert next(g for g in result["other"] if g["key"] == "83805-2")["inCatalog"] is True

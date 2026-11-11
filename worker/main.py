@@ -9,6 +9,7 @@ build_packet()  download every non-duplicate note and zip it with the
 from __future__ import annotations
 
 import asyncio
+import difflib
 import io
 import os
 import re
@@ -45,6 +46,55 @@ def file_name(doc: dict, fallback_title: str) -> str:
     ext = EXT.get((doc.get("contentType") or "").split(";")[0], "bin")
     title = safe(doc.get("title") or fallback_title) or "note"
     return f"{doc.get('date') or 'undated'}_{title}_{safe(doc.get('id') or '')}.{ext}"
+
+
+# ---------- title matching ----------
+
+TITLE_MATCH_MIN = float(os.getenv("TITLE_MATCH_MIN", "0.82"))  # 0-1; 1 = keyword must appear exactly
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9&]+", " ", (text or "").lower()).split())
+
+
+def title_score(title: str, code: str) -> float:
+    """How well a note title fits a document code: 1.0 when one of its keywords appears,
+    otherwise the best fuzzy similarity of a keyword (or the label) to a run of the same
+    number of words in the title, so "Nursing Narr" or "Discharge Sumary" still match."""
+    entry = DOCUMENT_CODES.get(code)
+    t = _norm(title)
+    if not entry or not t:
+        return 0.0
+    keywords = [_norm(k) for k in entry.get("title_keywords", [])]
+    if any(k and k in t for k in keywords):
+        return 1.0
+    words = t.split()
+    best = 0.0
+    for phrase in keywords + [_norm(entry["label"])]:
+        if len(phrase) < 6:  # short keywords like "h&p" only count as exact matches
+            continue
+        n = len(phrase.split())
+        for i in range(max(1, len(words) - n + 1)):
+            window = " ".join(words[i:i + n])
+            best = max(best, difflib.SequenceMatcher(None, phrase, window).ratio())
+    return round(min(best, 0.99), 2)  # 1.0 is reserved for exact keyword hits
+
+
+def best_title_match(title: str, codes: list[str]) -> tuple[str | None, float]:
+    scored = [(title_score(title, c), c) for c in codes]
+    score, code = max(scored, default=(0.0, None))
+    return (code, score) if score >= TITLE_MATCH_MIN else (None, score)
+
+
+def group_key(doc: dict) -> tuple[str, str, str | None]:
+    """(key, label, loinc) for grouping "other" records by document type."""
+    if doc.get("loinc"):
+        code = doc["loinc"][0]
+        return code, DOCUMENT_CODES.get(code, {}).get("label") or doc.get("title") or code, code
+    if doc.get("localCodes"):
+        local = doc["localCodes"][0].split(" ", 1)[0]  # "code display" -> code
+        return f"local:{local}", doc.get("title") or local, None
+    return f"title:{_norm(doc.get('title')) or 'untitled'}", doc.get("title") or "Untitled", None
 
 
 def binary_allowed(url: str, fhir_base: str) -> bool:
@@ -110,25 +160,49 @@ async def run_job_events(c: FhirClient, req: RunRequest):
 
     rows = [rows_by_code[i.code] for i in p.documents]  # back in plan order
 
-    if req.title_fallback and rows:
+    # One search for everything the patient has: notes no plan code found are either
+    # matched to a plan code by title, or listed as "other records" (not downloaded).
+    other_groups: list[dict] = []
+    other_info = {"error": None, "truncated": False, "request": ""}
+    if (req.title_fallback and rows) or req.discover:
+        by_code = {r["code"]: r for r in rows}
+        groups: dict[str, dict] = {}
         try:
-            for d in await c.documents_by_category(req.patient_id, start, end):
+            everything = await c.documents_all(req.patient_id, start, end)
+            other_info.update(truncated=getattr(everything, "truncated", False),
+                              request=getattr(everything, "request_url", ""))
+            for d in everything:
                 if d.get("id") in seen or d.get("status") == "entered-in-error":
                     continue
                 s = doc_summary(d)
-                title = (s["title"] or "").lower()
-                row = next((r for r in rows
-                            if any(k in title for k in DOCUMENT_CODES.get(r["code"], {}).get("title_keywords", []))),
-                           None)
-                if row:
-                    s.update(matchedBy="title", duplicate=False, file=file_name(s, row["label"]))
-                    row["docs"].append(s)
-                    row["count"] += 1
+                # Title matching is for notes Cerner never coded with LOINC; a note that has a
+                # different LOINC code is a different document type and goes to "other".
+                if req.title_fallback and rows and not s.get("loinc"):
+                    code, score = best_title_match(s["title"], list(by_code))
+                    if code:
+                        row = by_code[code]
+                        s.update(matchedBy="title", matchScore=score, duplicate=False, file=file_name(s, row["label"]))
+                        row["docs"].append(s)
+                        row["count"] += 1
+                        seen.add(s["id"])
+                        continue
+                if req.discover:
+                    key, label, loinc = group_key(s)
+                    s.update(matchedBy="other", duplicate=False, file=file_name(s, label))
+                    g = groups.setdefault(key, {"key": key, "label": label, "loinc": loinc,
+                                                "inCatalog": loinc in DOCUMENT_CODES, "docs": []})
+                    g["docs"].append(s)
                     seen.add(s["id"])
         except FhirError as e:
-            rows.append({"code": "clinical-note", "label": "Title-match sweep", "reason": "",
-                         "count": 0, "error": str(e), "docs": []})
+            other_info["error"] = str(e)
+        for g in groups.values():
+            dates = sorted(d["date"] for d in g["docs"] if d.get("date"))
+            g.update(count=len(g["docs"]), first=dates[0] if dates else None, last=dates[-1] if dates else None)
+            g["docs"].sort(key=lambda d: d.get("date") or "", reverse=True)
+        other_groups = sorted(groups.values(), key=lambda g: -g["count"])
         yield {"type": "sweep", "rows": rows}
+        if req.discover:
+            yield {"type": "other", "groups": other_groups, **other_info}
 
     observations, obs_error, obs_truncated = [], None, False
     if p.observations:
@@ -145,6 +219,8 @@ async def run_job_events(c: FhirClient, req: RunRequest):
         "patient": patient, "window": {"start": start, "end": end},
         "rows": rows, "observations": observations, "observationError": obs_error,
         "observationsTruncated": obs_truncated,
+        "other": other_groups, "otherError": other_info["error"], "otherTruncated": other_info["truncated"],
+        "otherRequest": other_info["request"],
         "missing": [r["code"] for r in rows if r["count"] == 0 and not r["error"]]}}
 
 
@@ -175,6 +251,9 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
     lines = [f"Member: {pt.get('name', '')} | DOB {us_date(pt.get('birthDate'))} | Patient/{pt.get('id', '')}",
              f"Measures: {', '.join(plan.measures) or 'generic'} | Window: {window}", ""]
     for r in result.get("rows", []):
+        if r.get("extra"):  # other records the reviewer added to the packet
+            lines.append(f"  {r.get('label')}: {r.get('count', 0)} added to this packet")
+            continue
         if r.get("error"):
             status = f"ERROR: {r['error']}"
         elif r.get("count"):
@@ -182,6 +261,19 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
         else:
             status = "NOT in this record"
         lines.append(f"  {r.get('label')} (LOINC {r.get('code')}): {status}")
+    other = result.get("other") or []
+    if other or result.get("otherError"):
+        added = {d.get("id") for r in result.get("rows", []) if r.get("extra") for d in r.get("docs", [])}
+        left = [(g, sum(1 for d in g.get("docs", []) if d.get("id") not in added)) for g in other]
+        left = [(g, n) for g, n in left if n]
+        lines += ["", "  Other records in the chart, not in this packet:"]
+        if result.get("otherError"):
+            lines.append(f"    ERROR listing them: {result['otherError']}")
+        for g, n in left:
+            code = g.get("loinc") or g.get("key", "")
+            lines.append(f"    {g.get('label')} ({code}): {n}")
+        if not left and not result.get("otherError"):
+            lines.append("    none")
     if plan.observations:
         obs = result.get("observations") or []
         codes = ", ".join(o.code for o in plan.observations)

@@ -32,6 +32,15 @@ function demoPatientsFor(fhirBase = "") {
   return [];
 }
 
+// The /api/run result plus the "other" records the reviewer picked, as one extra row.
+function packetResult(run) {
+  const picked = new Set(run.otherSelected || []);
+  const docs = (run.result.other || []).flatMap((g) => g.docs).filter((d) => picked.has(d.id));
+  if (!docs.length) return run.result;
+  const extra = { code: "other", label: "Other records (added)", reason: "added from Other records", count: docs.length, error: null, docs, extra: true };
+  return { ...run.result, rows: [...run.result.rows, extra] };
+}
+
 const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
 
 export default function App() {
@@ -46,6 +55,8 @@ export default function App() {
   const [patientId, setPatientId] = useState("");
   const [applyDates, setApplyDates] = useState(true);
   const [titleFallback, setTitleFallback] = useState(false);
+  const [discover, setDiscover] = useState(true); // list every other record the patient has
+  const [includeOther, setIncludeOther] = useState(false); // put those in the packet too ("all records")
   const [run, setRun] = useState(null); // { id, plan as sent, result, progress, done }
   const [packet, setPacket] = useState(null); // { runId, job, state, files, counts, failed, error }
   const [busy, setBusy] = useState("");
@@ -126,6 +137,8 @@ export default function App() {
       if (planRes.status === "fulfilled") {
         const on = (items) => items.map((i) => ({ ...i, on: true }));
         setPlan({ ...planRes.value, documents: on(planRes.value.documents), observations: on(planRes.value.observations) });
+        setIncludeOther(!!planRes.value.all_records);
+        if (planRes.value.all_records) setDiscover(true);
       } else {
         problems.push(`Service note: ${planRes.reason.message}`);
       }
@@ -143,6 +156,8 @@ export default function App() {
       const p = await api.plan(note, useLlm);
       const on = (items) => items.map((i) => ({ ...i, on: true }));
       setPlan({ ...p, documents: on(p.documents), observations: on(p.observations) });
+      setIncludeOther(!!p.all_records);
+      if (p.all_records) setDiscover(true);
       setRun(null);
     });
 
@@ -154,14 +169,15 @@ export default function App() {
       setRun(null);
       runAbort.current = new AbortController();
       await api.runStream(
-        { patient_id: patientId, plan: sent, apply_dates: applyDates, title_fallback: titleFallback },
+        { patient_id: patientId, plan: sent, apply_dates: applyDates, title_fallback: titleFallback, discover },
         (ev) => {
           if (ev.type === "start") {
             setRun({
               id: Date.now(),
               plan: sent,
               done: false,
-              progress: { codes: ev.codes, finished: [], phase: "documents", observations: ev.observations, titleSweep: ev.titleSweep },
+              otherSelected: [],
+              progress: { codes: ev.codes, finished: [], phase: "documents", observations: ev.observations, titleSweep: ev.titleSweep, discover },
               result: { patient: ev.patient, window: ev.window, rows: [], observations: [], observationError: null, missing: [] },
             });
           } else if (ev.type === "row") {
@@ -172,6 +188,13 @@ export default function App() {
             }));
           } else if (ev.type === "sweep") {
             setRun((r) => ({ ...r, progress: { ...r.progress, phase: "observations" }, result: { ...r.result, rows: ev.rows } }));
+          } else if (ev.type === "other") {
+            const ids = ev.groups.flatMap((g) => g.docs.filter((d) => d.binaryUrl).map((d) => d.id));
+            setRun((r) => ({
+              ...r,
+              otherSelected: includeOther ? ids : [],
+              result: { ...r.result, other: ev.groups, otherError: ev.error, otherTruncated: ev.truncated, otherRequest: ev.request },
+            }));
           } else if (ev.type === "observations") {
             setRun((r) => ({ ...r, result: { ...r.result, observations: ev.observations, observationError: ev.observationError, observationsTruncated: ev.observationsTruncated } }));
           } else if (ev.type === "done") {
@@ -188,12 +211,19 @@ export default function App() {
     setError("");
     setInfo("");
     try {
-      const job = await api.packetStart(run.plan, run.result);
+      const job = await api.packetStart(run.plan, packetResult(run));
       setPacket({ runId: run.id, startedAt: Date.now(), ...job });
     } catch (e) {
       setError(`Packet failed to start: ${e.message}`);
     }
   };
+
+  const toggleOther = (ids, on) =>
+    setRun((r) => {
+      const selected = new Set(r.otherSelected);
+      ids.forEach((id) => (on ? selected.add(id) : selected.delete(id)));
+      return { ...r, otherSelected: [...selected] };
+    });
 
   const startOver = () => {
     runAbort.current?.abort();
@@ -207,6 +237,8 @@ export default function App() {
     setPatientId("");
     setApplyDates(true);
     setTitleFallback(false);
+    setDiscover(true);
+    setIncludeOther(false);
     setRun(null);
     setPacket(null);
     setBusy("");
@@ -414,7 +446,15 @@ export default function App() {
             </label>
             <label className="check">
               <input type="checkbox" checked={titleFallback} onChange={(e) => setTitleFallback(e.target.checked)} />
-              Also match notes by title (catches notes with no LOINC)
+              Also match notes by title, close matches included (catches notes with no LOINC)
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={discover} onChange={(e) => { setDiscover(e.target.checked); if (!e.target.checked) setIncludeOther(false); }} />
+              List the member's other records (“Not downloaded”)
+            </label>
+            <label className="check" title="On automatically when the service note asks for all medical records">
+              <input type="checkbox" checked={includeOther} disabled={!discover} onChange={(e) => setIncludeOther(e.target.checked)} />
+              Put every other record in the packet too
             </label>
             <button className="primary" onClick={fetchAll} disabled={!!busy || !plan || !patientId || selected === 0 || !windowOk}>
               Fetch ({selected} codes)
@@ -426,7 +466,9 @@ export default function App() {
             <p className="hint">Requests to Cerner are spaced out: at most {health.fhirMaxRps}/s, {health.fhirConcurrency} codes at a time, with automatic retry when Cerner throttles.</p>
           )}
 
-          {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} rps={health?.fhirMaxRps} />}
+          {plan?.all_records && <p className="hint">The service note asks for <b>all medical records</b>: every record the member has goes in the packet (the plan codes plus everything under “Other records”).</p>}
+
+          {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} onToggleOther={toggleOther} rps={health?.fhirMaxRps} />}
         </section>
       </main>
 
@@ -552,12 +594,13 @@ function useFilter(items, text, fields) {
   return items.filter((it) => fields.some((f) => String(f(it) ?? "").toLowerCase().includes(q)));
 }
 
-const DL_LABEL = { ready: "Ready", queued: "Queued", downloading: "Downloading", done: "Done", failed: "Failed", duplicate: "Duplicate", nofile: "No file" };
+const DL_LABEL = { ready: "Ready", queued: "Queued", downloading: "Downloading", done: "Done", failed: "Failed", duplicate: "Duplicate", nofile: "No file", notdownloaded: "Not downloaded" };
 
-// Where a note stands in the packet download.
-function downloadStatus(d, packet) {
+// Where a note stands in the packet download. `picked` = other records added to the packet.
+function downloadStatus(d, packet, picked) {
   if (!d.binaryUrl) return { status: "nofile" };
   if (d.duplicate) return { status: "duplicate", error: "Already in the packet under another code" };
+  if (d.matchedBy === "other" && !picked?.has(d.id)) return { status: "notdownloaded", error: "Not in the LOINC plan. Tick it to add it to the packet." };
   const f = packet?.files?.[d.file];
   return f ? { status: f.status, error: f.error } : { status: "ready" };
 }
@@ -614,7 +657,11 @@ function DocTab({ row, packet }) {
                       {(d.matchedBy === "title" || (d.docStatus && d.docStatus !== "final")) && (
                         <div className="chips sub">
                           {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
-                          {d.matchedBy === "title" && <span className="chip warn">matched by title</span>}
+                          {d.matchedBy === "title" && (
+                            <span className="chip warn" title="No LOINC match; matched on the note title">
+                              {d.matchScore != null && d.matchScore < 1 ? `close title match ${Math.round(d.matchScore * 100)}%` : "matched by title"}
+                            </span>
+                          )}
                         </div>
                       )}
                     </td>
@@ -634,6 +681,113 @@ function DocTab({ row, packet }) {
       )}
       {filter && docs.length === 0 && <p className="hint">No notes match “{filter}”.</p>}
       <Pager pager={pager} noun="notes" />
+    </div>
+  );
+}
+
+// Records the member has that no plan code covered, grouped by type. Not downloaded
+// unless the reviewer ticks them (or the note asked for all medical records).
+function OtherTab({ r, done, packet, picked, onToggle }) {
+  const [open, setOpen] = useState(() => new Set());
+  if (!r.other && !r.otherError) {
+    return <p className="hint">{done ? "No other records." : "Listing the member's other records once the plan codes are fetched…"}</p>;
+  }
+  const groups = r.other || [];
+  const selectable = (g) => g.docs.filter((d) => d.binaryUrl).map((d) => d.id);
+  const all = groups.flatMap(selectable);
+  const pickedCount = all.filter((id) => picked.has(id)).length;
+  const locked = packet?.state === "running";
+  const toggleOpen = (key) => setOpen((o) => { const n = new Set(o); n.has(key) ? n.delete(key) : n.add(key); return n; });
+
+  return (
+    <div>
+      <div className="tab-head">
+        <div>
+          <b>Other records</b> <span className="muted">· not in the LOINC plan</span>
+          <div className="hint">
+            {all.length} records in {groups.length} types. They are <b>not downloaded</b> unless you add them; {pickedCount} added to the packet.
+          </div>
+        </div>
+        {all.length > 0 && (
+          <div className="row tight">
+            <button className="ghost" disabled={locked || pickedCount === all.length} onClick={() => onToggle(all, true)}>Add all to packet</button>
+            <button className="ghost" disabled={locked || pickedCount === 0} onClick={() => onToggle(all, false)}>Remove all</button>
+          </div>
+        )}
+      </div>
+      {r.otherRequest && (
+        <div className="request" title="The FHIR search sent to Cerner for every record of this member">
+          <span className="request-verb">GET</span>
+          <code>{r.otherRequest}</code>
+        </div>
+      )}
+      {r.otherError && <div className="banner error small">Could not list other records: {r.otherError}</div>}
+      {r.otherTruncated && <div className="banner warn">Only the first pages were read; the member has more records. Narrow the date window or raise FHIR_MAX_PAGES.</div>}
+      {locked && <p className="hint warn-text">The packet is downloading; changes apply to the next packet.</p>}
+      {groups.length === 0 && !r.otherError && <div className="banner warn">Every record the member has is already covered by the plan.</div>}
+
+      <div className="other-groups">
+        {groups.map((g) => {
+          const ids = selectable(g);
+          const n = ids.filter((id) => picked.has(id)).length;
+          const isOpen = open.has(g.key);
+          return (
+            <div key={g.key} className={`other-group ${n ? "has-picked" : ""}`}>
+              <div className="other-head">
+                <input type="checkbox" aria-label={`Add all ${g.label} to the packet`} disabled={locked || ids.length === 0}
+                  checked={ids.length > 0 && n === ids.length}
+                  ref={(el) => { if (el) el.indeterminate = n > 0 && n < ids.length; }}
+                  onChange={(e) => onToggle(ids, e.target.checked)} />
+                <button className="other-title" onClick={() => toggleOpen(g.key)} aria-expanded={isOpen}>
+                  <span className="trace-caret">{isOpen ? "▾" : "▸"}</span>
+                  <b>{g.label}</b>
+                  {g.loinc ? <span className="mono muted">LOINC {g.loinc}</span> : <span className="chip">no LOINC</span>}
+                  {g.inCatalog && <span className="chip" title="This code is on the allowed list but wasn't in the plan">known code, not requested</span>}
+                </button>
+                <span className="mono muted nowrap">{g.first ? `${toUS(g.first)} – ${toUS(g.last)}` : ""}</span>
+                <span className="tab-count">{n ? `${n}/${g.count}` : g.count}</span>
+              </div>
+              {isOpen && <OtherDocs docs={g.docs} packet={packet} picked={picked} onToggle={onToggle} locked={locked} />}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function OtherDocs({ docs, packet, picked, onToggle, locked }) {
+  const pager = usePager(docs);
+  return (
+    <div className="other-docs">
+      <div className="table-wrap">
+        <table className="doc-table">
+          <colgroup>
+            <col className="col-check" /><col className="col-date" /><col /><col className="col-author" /><col className="col-status" /><col className="col-file" />
+          </colgroup>
+          <thead><tr><th></th><th>Date</th><th>Title</th><th>Author</th><th>Status</th><th>File</th></tr></thead>
+          <tbody>
+            {pager.pageItems.map((d) => (
+              <tr key={d.id} className={picked.has(d.id) ? "picked" : ""}>
+                <td>
+                  <input type="checkbox" aria-label={`Add ${d.title} to the packet`} disabled={locked || !d.binaryUrl}
+                    checked={picked.has(d.id)} onChange={(e) => onToggle([d.id], e.target.checked)} />
+                </td>
+                <td className="mono nowrap">{d.date ? toUS(d.date) : "undated"}</td>
+                <td><b>{d.title || "(untitled)"}</b></td>
+                <td className="muted">{d.author}</td>
+                <td><StatusChip {...downloadStatus(d, packet, picked)} /></td>
+                <td className="nowrap">
+                  {d.binaryUrl
+                    ? <a className="open-link" href={api.binaryUrl(d)} target="_blank" rel="noreferrer" title={`Binary: ${d.binaryUrl}`}>Open</a>
+                    : <span className="muted small">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pager pager={pager} noun="records" />
     </div>
   );
 }
@@ -728,10 +882,13 @@ function PacketProgress({ packet, onSaveAgain }) {
   );
 }
 
-function Results({ run, packet, onPacket, rps }) {
+function Results({ run, packet, onPacket, onToggleOther, rps }) {
   const r = run.result;
   const [tab, setTab] = useState("overview");
-  const notes = r.rows.flatMap((row) => row.docs.filter((d) => !d.duplicate && d.binaryUrl));
+  const picked = new Set(run.otherSelected || []);
+  const otherDocs = (r.other || []).flatMap((g) => g.docs);
+  const pickedDocs = otherDocs.filter((d) => picked.has(d.id) && d.binaryUrl);
+  const notes = [...r.rows.flatMap((row) => row.docs.filter((d) => !d.duplicate && d.binaryUrl)), ...pickedDocs];
   const files = ["00_biographical-sheet.txt", ...[...new Set(notes.map((d) => d.file))].sort(), "missing-items.txt"];
   const missing = r.rows.filter((row) => row.count === 0 && !row.error).length;
   const minutes = rps > 0 ? Math.ceil(notes.length / rps / 60) : 0;
@@ -744,6 +901,7 @@ function Results({ run, packet, onPacket, rps }) {
   const tabs = [
     { id: "overview", label: "Overview" },
     ...docRows.map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count, state: row.error ? "error" : row.count ? "" : "missing" })),
+    ...(run.progress.discover ? [{ id: "other", label: "Other records", count: r.other ? (pickedDocs.length ? `${pickedDocs.length}/${otherDocs.length}` : otherDocs.length) : undefined, state: r.otherError ? "error" : "other" }] : []),
     ...(run.progress.observations ? [{ id: "results", label: "Results", count: r.observations.length, state: r.observationError ? "error" : "" }] : []),
     { id: "packet", label: "Packet", count: run.done ? files.length : undefined },
   ];
@@ -802,6 +960,17 @@ function Results({ run, packet, onPacket, rps }) {
                       </tr>
                     );
                   })}
+                  {run.progress.discover && (
+                    <tr className="clickable" onClick={() => setTab("other")}>
+                      <td className="mono code">other</td>
+                      <td>Other records (not in the plan)</td>
+                      <td>
+                        {r.otherError ? <span className="bad" title={r.otherError}>error</span>
+                          : r.other ? `${otherDocs.length} in ${r.other.length} types` : <span className="muted">waiting…</span>}
+                      </td>
+                      <td className="muted">{r.other ? (pickedDocs.length ? `${pickedDocs.length} added to the packet` : "Not downloaded") : ""}</td>
+                    </tr>
+                  )}
                   {run.progress.observations && (
                     <tr className="clickable" onClick={() => setTab("results")}>
                       <td className="mono code">results</td>
@@ -818,6 +987,8 @@ function Results({ run, packet, onPacket, rps }) {
         )}
 
         {current && <DocTab key={current.code} row={current} packet={packet} />}
+
+        {tab === "other" && <OtherTab r={r} done={run.done} packet={packet} picked={picked} onToggle={onToggleOther} />}
 
         {tab === "results" && <ResultsTab r={r} />}
 

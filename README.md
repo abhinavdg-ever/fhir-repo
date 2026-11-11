@@ -110,7 +110,7 @@ UI work (Node 18+): start the backend first (`.\run.cmd -Dev`), then in a second
 
 ## Try Cerner with curl
 
-The open sandbox needs no login. Patient `12742400` is Tim Peters (DOB 1990-09-15). On Windows type `curl.exe` (in PowerShell plain `curl` is a different command), and add `--ssl-no-revoke` if you get `CRYPT_E_NO_REVOCATION_CHECK`.
+The open sandbox needs no login. Patient `12742400` is Tim Peters (DOB 1990-09-15). macOS / Linux:
 
 ```bash
 # Patient by ID, then by name + DOB
@@ -126,12 +126,22 @@ curl -H "Accept: application/pdf" -o note.pdf "https://fhir-open.cerner.com/r4/e
 
 # Blood pressure results
 curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Observation?patient=12742400&code=http://loinc.org%7C85354-9&_count=10"
+
+# Every record the member has, any type (what "Other records" uses)
+curl -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/DocumentReference?patient=12742400&_count=100"
 ```
 
-Windows example:
+**Windows** — always `curl.exe` (not `curl`) and always `--ssl-no-revoke` (Windows curl otherwise fails with `CRYPT_E_NO_REVOCATION_CHECK` when the revocation server is blocked, as on most VMs):
 
 ```powershell
 curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Patient/12742400"
+curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Patient?family=Peters&given=Tim&birthdate=1990-09-15"
+curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/DocumentReference?patient=12742400&type=http://loinc.org%7C34117-2&_count=100&period=ge2025-01-01&period=lt2026-11-12"
+curl.exe --ssl-no-revoke -H "Accept: application/pdf" -o note.pdf "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Binary/XR-208978749"
+curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/Observation?patient=12742400&code=http://loinc.org%7C85354-9&_count=10"
+
+# Every record the member has, any type (what "Other records" uses)
+curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d/DocumentReference?patient=12742400&_count=100"
 ```
 
 ## Playing with the model (`.env`)
@@ -169,6 +179,12 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) and are organised into tabs: Overview, one tab per document type (10 per page, with the exact DocumentReference request shown), Results (observations) and Packet.
 
 The packet is a background job: each note's file is a separate `GET Binary/{id}` call (the DocumentReference's `content[].attachment.url`), so a large record takes a few minutes. The page stays usable meanwhile and each note's Status shows Queued → Downloading → Done / Failed. The zip is held in memory until saved.
+
+**Document types.** `agent/doc_types.py` lists 24 document LOINC codes, including the ones Cerner actually puts on notes (e.g. `83805-2` admission note, `28623-7` nursing narrative, `28568-4` / `57053-1` ED physician / nurse, `34108-1` outpatient, `18761-7` transfer summary, `11504-8` operative report). Title keywords include Cerner's own titles ("Inpatient Clinical Summary" is a discharge summary).
+
+**Title matching** (optional) catches notes Cerner never coded with LOINC: exact keyword hits score 1.0, and close titles ("Nursing Narr", "Discharge Sumary") match on similarity (`TITLE_MATCH_MIN`, default 0.82) and show as *close title match NN%*. Notes that have a different LOINC code are not pulled in by title.
+
+**Other records.** Fetch also runs one search for every record the member has (`DocumentReference?patient=…`, no type) and lists everything the plan didn't cover in the **Other records** tab, grouped by type, as **Not downloaded**. Tick a record or a whole type to add it to the packet. When the service note asks for **all medical records**, every other record goes in the packet automatically (the plan codes plus everything else); the missing-items sheet lists what was left out.
 
 The **API trace** panel at the bottom lists every call for the current request — the browser's calls to this app and the backend's calls to Cerner (status, time, retries). It clears with each new request; **Start over** at the top resets everything.
 

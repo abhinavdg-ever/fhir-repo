@@ -19,6 +19,7 @@ class Plan(BaseModel):
     observations: list[PlanItem] = Field(default_factory=list)
     source: str = "rules"  # "azure-openai" | "rules"
     notes: str = ""
+    all_records: bool = False  # the note asks for all medical records: every record goes in the packet
 
 
 class PlanRequest(BaseModel):
@@ -30,7 +31,8 @@ class RunRequest(BaseModel):
     patient_id: str
     plan: Plan
     apply_dates: bool = True       # off = no period/date params (handy on the sandbox)
-    title_fallback: bool = False   # also sweep clinical-note and match titles for unmapped notes
+    title_fallback: bool = False   # also match unmapped notes to plan codes by title (close matches count)
+    discover: bool = True          # list every other record the patient has ("Not downloaded")
 
 
 class PacketRequest(BaseModel):

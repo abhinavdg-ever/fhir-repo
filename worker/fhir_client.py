@@ -213,6 +213,13 @@ class FhirClient:
             params += [("period", f"ge{start}"), ("period", f"lt{end}")]
         return await self.search("DocumentReference", params)
 
+    async def documents_all(self, pid: str, start: str | None, end: str | None) -> SearchResults:
+        """Every DocumentReference for the patient (no type filter), for title matching and "other records"."""
+        params = [("patient", pid), ("_count", "100")]
+        if start and end:
+            params += [("period", f"ge{start}"), ("period", f"lt{end}")]
+        return await self.search("DocumentReference", params)
+
     async def documents_by_category(self, pid: str, start: str | None, end: str | None,
                                     category: str = "clinical-note") -> list[dict]:
         params = [("patient", pid), ("category", category), ("_count", "100")]

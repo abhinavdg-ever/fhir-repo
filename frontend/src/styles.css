@@ -451,6 +451,29 @@ tr.missing { background: var(--bad-bg); }
 .suggest .row.tight button.ghost { padding: 0.18rem 0.55rem; font-size: 0.74rem; }
 .chips.sub { margin-top: 0.25rem; }
 
+/* ---------- other records ---------- */
+.other-groups { display: flex; flex-direction: column; gap: 0.4rem; }
+.other-group { border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.other-group.has-picked { border-color: var(--brand-300); }
+.other-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.45rem 0.7rem; flex-wrap: wrap; }
+.other-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex: 1 1 16rem;
+  min-width: 0;
+  flex-wrap: wrap;
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-weight: 400;
+}
+.other-docs { padding: 0 0.7rem 0.6rem; }
+.doc-table .col-check { width: 2.4rem; }
+.dl-notdownloaded { font-weight: 500; color: var(--muted); border-style: dashed; }
+.tab.other .tab-count { border-style: dashed; }
+
 /* ---------- download status ---------- */
 .dl {
   display: inline-flex;

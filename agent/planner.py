@@ -12,8 +12,8 @@ import os
 import re
 from datetime import date, timedelta
 
-from agent.doc_types import (DOCUMENT_CODES, GENERIC_DOCUMENTS, MEASURES, OBSERVATION_CODES,
-                             RULES, doc_label, obs_label)
+from agent.doc_types import (ALL_RECORDS_PHRASES, DOCUMENT_CODES, GENERIC_DOCUMENTS, MEASURES,
+                             OBSERVATION_CODES, RULES, doc_label, obs_label)
 from common.models import Plan, PlanItem
 
 
@@ -38,6 +38,11 @@ def find_measures(note: str) -> list[str]:
     return [m for m in MEASURES if re.search(rf"\b{m}\b", note)]
 
 
+def wants_all_records(note: str) -> bool:
+    text = note.lower()
+    return any(p in text for p in ALL_RECORDS_PHRASES)
+
+
 def rules_plan(note: str, today: date | None = None) -> Plan:
     text = note.lower()
     docs: dict[str, str] = {}
@@ -49,14 +54,14 @@ def rules_plan(note: str, today: date | None = None) -> Plan:
         target = docs if kind == "document" else obs
         for c in codes:
             target.setdefault(c, f'note mentions "{hit}"')
-    if "all medical records" in text:
+    if wants_all_records(note):
         for c in GENERIC_DOCUMENTS:
             docs.setdefault(c, "generic all-records request")
     if obs and "11506-3" not in docs:  # BP / A1c evidence usually sits in the visit note
         docs["11506-3"] = "visit note that shows the result and provider"
     start, end = date_window(note, today)
     return Plan(
-        measures=find_measures(note), start=start, end=end,
+        measures=find_measures(note), start=start, end=end, all_records=wants_all_records(note),
         documents=[PlanItem(code=c, label=doc_label(c), reason=r) for c, r in docs.items()],
         observations=[PlanItem(code=c, label=obs_label(c), reason=r) for c, r in obs.items()],
         source="rules",
@@ -165,7 +170,7 @@ def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
             measures.append(m)
 
     return Plan(
-        measures=measures, start=start, end=end,
+        measures=measures, start=start, end=end, all_records=wants_all_records(note),
         documents=items("documents", DOCUMENT_CODES, doc_label),
         observations=items("observations", OBSERVATION_CODES, obs_label),
         source="azure-openai",
