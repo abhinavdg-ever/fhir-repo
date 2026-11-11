@@ -88,6 +88,14 @@ export const api = {
   catalog: () => call("/api/catalog"),
   prompt: (service_note) =>
     call("/api/prompt", { method: "POST", body: JSON.stringify({ service_note, use_llm: true }) }),
+  encounters: (patient, start, end) => {
+    const q = new URLSearchParams({ patient });
+    if (start) q.set("start", start);
+    if (end) q.set("end", end);
+    return call(`/api/encounters?${q}`);
+  },
+  encounterDocs: (patient, encounterId) =>
+    call(`/api/encounters/${encodeURIComponent(encounterId)}/documents?${new URLSearchParams({ patient })}`),
   plan: (service_note, use_llm) =>
     call("/api/plan", { method: "POST", body: JSON.stringify({ service_note, use_llm }) }),
   patients: (name, birthdate) => {

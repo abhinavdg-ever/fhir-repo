@@ -220,6 +220,11 @@ class FhirClient:
             params += [("period", f"ge{start}"), ("period", f"lt{end}")]
         return await self.search("DocumentReference", params)
 
+    async def documents_by_encounter(self, pid: str, encounter_id: str) -> SearchResults:
+        """Every note written for one visit. Cerner needs patient as well as encounter."""
+        params = [("patient", pid), ("encounter", encounter_id), ("_count", "100")]
+        return await self.search("DocumentReference", params)
+
     async def documents_by_category(self, pid: str, start: str | None, end: str | None,
                                     category: str = "clinical-note") -> list[dict]:
         params = [("patient", pid), ("category", category), ("_count", "100")]

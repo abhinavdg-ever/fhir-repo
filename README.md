@@ -219,7 +219,7 @@ The output is validated before anything reaches Cerner: unknown groups and targe
 
 **Match By Doc Name** (optional) catches notes Cerner never coded with LOINC: exact keyword hits score 1.0, and close titles ("Nursing Narr", "Discharge Sumary") match on similarity (`TITLE_MATCH_MIN`, default 0.82) and show as *close title match NN%*. Notes that have a different LOINC code are not pulled in by title.
 
-**Other records** (off by default; tick **List Other Records**). Fetch then also runs one search for every record the member has (`DocumentReference?patient=…`, no type) and lists everything the plan didn't cover in the **Other records** tab, grouped by type, as **Not downloaded**. Tick a record or a whole type to add it to the packet. When the service note asks for **all medical records**, every other record goes in the packet automatically (the plan codes plus everything else); the missing-items sheet lists what was left out.
+**Other records** (off by default; tick **List Other Records**). Fetch then also runs one search for every record the member has (`DocumentReference?patient=…`, no type) and lists everything the plan didn't cover in the **Other records** tab, grouped by type, as **Not downloaded**. Tick a record or a whole type to add it to the packet. When the service note asks for **all medical records**, **Download All Record Types** is ticked automatically and every other record goes in the packet (the plan codes plus everything else); the missing-items sheet lists what was left out.
 
 The **API trace** panel at the bottom lists every call for the current request — the browser's calls to this app and the backend's calls to Cerner (status, time, retries). It clears with each new request; **Start over** at the top resets everything.
 

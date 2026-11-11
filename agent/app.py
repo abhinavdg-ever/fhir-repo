@@ -8,6 +8,8 @@
   POST /api/run        run the plan against Cerner (worker.main.handle_job)
   POST /api/run/stream the same, as NDJSON progress events (one line per LOINC call)
   GET  /api/calls      the FHIR requests sent to Cerner (for the UI's API calls window)
+  GET  /api/encounters                 a member's visits and stays (encounter view)
+  GET  /api/encounters/{id}/documents  every note written for one visit
   GET  /api/binary     stream one note's file from its Binary URL
   POST /api/packet     build the zip packet in memory and stream it back (blocking)
   POST /api/packet/jobs             start a packet download in the background
@@ -44,8 +46,9 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from agent.doc_types import DOCUMENT_CODES, OBSERVATION_CODES  # noqa: E402
 from agent.planner import LlmError, build_messages, llm_configured, llm_settings, make_plan  # noqa: E402
 from common.models import PacketRequest, Plan, PlanRequest, RunRequest  # noqa: E402
-from worker.fhir_client import CALL_LOG, FhirClient, FhirError, patient_summary  # noqa: E402
-from worker.main import CONCURRENCY, DOWNLOAD_CONCURRENCY, binary_allowed, build_packet, handle_job, run_job_events, safe  # noqa: E402
+from worker.fhir_client import (CALL_LOG, FhirClient, FhirError, doc_summary,  # noqa: E402
+                                encounter_summary, patient_summary)
+from worker.main import CONCURRENCY, DOWNLOAD_CONCURRENCY, binary_allowed, file_name, build_packet, handle_job, run_job_events, safe  # noqa: E402
 from worker.packets import JOBS, start_packet_job  # noqa: E402
 
 FHIR_BASE = os.getenv("FHIR_BASE", "https://fhir-open.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d")
@@ -144,6 +147,41 @@ async def run_stream(req: RunRequest):
 
     return StreamingResponse(events(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/encounters")
+async def encounters(patient: str, start: str | None = None, end: str | None = None):
+    c = client()
+    try:
+        found = await c.encounters(patient, start, end)
+        visits = [encounter_summary(e) for e in found if e.get("status") != "entered-in-error"]
+        visits.sort(key=lambda v: v["start"] or "", reverse=True)
+        return {"encounters": visits, "request": getattr(found, "request_url", ""),
+                "truncated": getattr(found, "truncated", False)}
+    except FhirError as e:
+        raise HTTPException(502, str(e))
+    finally:
+        await c.close()
+
+
+@app.get("/api/encounters/{encounter_id}/documents")
+async def encounter_documents(encounter_id: str, patient: str):
+    c = client()
+    try:
+        found = await c.documents_by_encounter(patient, encounter_id)
+        docs = []
+        for d in found:
+            if d.get("status") == "entered-in-error":
+                continue
+            s = doc_summary(d)
+            s.update(matchedBy="encounter", duplicate=False, file=file_name(s, "Visit-note"))
+            docs.append(s)
+        docs.sort(key=lambda d: d.get("date") or "", reverse=True)
+        return {"docs": docs, "request": getattr(found, "request_url", ""), "truncated": getattr(found, "truncated", False)}
+    except FhirError as e:
+        raise HTTPException(502, str(e))
+    finally:
+        await c.close()
 
 
 @app.get("/api/binary")

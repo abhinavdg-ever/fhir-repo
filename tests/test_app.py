@@ -392,3 +392,26 @@ def test_run_reports_encounters_facility_and_gaps(monkeypatch):
     sheet = missing_sheet(result["patient"], Plan.model_validate(plan), result)
     assert "ELEMENTS NOT IN THE RECORD" in sheet and "Discharge medications not reconciled" in sheet
     assert "FACILITY CHECK" in sheet and "[required]" in sheet
+
+
+def test_encounter_endpoints(monkeypatch):
+    from worker import fhir_client
+
+    async def fake_encounters(self, pid, start, end):
+        return fhir_client.SearchResults([
+            {"resourceType": "Encounter", "id": "E1", "status": "finished", "class": {"code": "AMB"},
+             "period": {"start": "2026-02-05T09:00:00Z"}, "serviceProvider": {"display": "Family Clinic"}},
+            {"resourceType": "Encounter", "id": "E2", "status": "finished", "class": {"code": "IMP"},
+             "period": {"start": "2026-03-10T09:00:00Z", "end": "2026-03-14T09:00:00Z"}}], request_url="u")
+
+    async def fake_docs(self, pid, eid):
+        assert (pid, eid) == ("7", "E2")
+        return fhir_client.SearchResults([{"resourceType": "DocumentReference", "id": "9", "status": "current",
+                                           "type": {"text": "Discharge Summary"}, "date": "2026-03-14T00:00:00Z"}])
+
+    monkeypatch.setattr(fhir_client.FhirClient, "encounters", fake_encounters)
+    monkeypatch.setattr(fhir_client.FhirClient, "documents_by_encounter", fake_docs)
+    visits = client.get("/api/encounters", params={"patient": "7"}).json()["encounters"]
+    assert [(v["id"], v["class"]) for v in visits] == [("E2", "IMP"), ("E1", "AMB")]  # newest first
+    docs = client.get("/api/encounters/E2/documents", params={"patient": "7"}).json()["docs"]
+    assert docs[0]["id"] == "9" and docs[0]["matchedBy"] == "encounter" and docs[0]["file"].endswith(".bin")

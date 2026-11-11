@@ -107,6 +107,8 @@ def docrefs(request: Request):
         when = d["context"]["period"]["start"][:10]
         if not in_window(when, params, "period"):
             continue
+        if "encounter" in q and not any(e["reference"].endswith("/" + q["encounter"]) for e in d["context"]["encounter"]):
+            continue
         if "type" in q:
             system, code = q["type"].split("|")
             if not any(c["system"] == system and c["code"] == code for c in d["type"]["coding"]):

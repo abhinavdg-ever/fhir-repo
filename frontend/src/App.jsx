@@ -35,11 +35,21 @@ function demoPatientsFor(fhirBase = "") {
 }
 
 // The /api/run result plus the "other" records the reviewer picked, as one extra row.
+function extraDocs(run) {
+  // Records outside the plan rows: Other records plus notes fetched per visit, without repeats.
+  const inRows = new Set(run.result.rows.flatMap((r) => r.docs.map((d) => d.id)));
+  const byId = new Map();
+  for (const d of [...(run.result.other || []).flatMap((g) => g.docs), ...Object.values(run.extraDocs || {})]) {
+    if (!inRows.has(d.id) && !byId.has(d.id)) byId.set(d.id, d);
+  }
+  return [...byId.values()];
+}
+
 function packetResult(run) {
   const picked = new Set(run.otherSelected || []);
-  const docs = (run.result.other || []).flatMap((g) => g.docs).filter((d) => picked.has(d.id));
+  const docs = extraDocs(run).filter((d) => picked.has(d.id));
   if (!docs.length) return run.result;
-  const extra = { code: "other", label: "Other records (added)", reason: "added from Other records", count: docs.length, error: null, docs, extra: true };
+  const extra = { code: "other", label: "Other records (added)", reason: "added by the reviewer", count: docs.length, error: null, docs, extra: true };
   return { ...run.result, rows: [...run.result.rows, extra] };
 }
 
@@ -64,9 +74,9 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
-  const [traceOpen, setTraceOpen] = useState(true);
+  const [traceOpen, setTraceOpen] = useState(false);
   const [formKey, setFormKey] = useState(0); // bumps on Start over to reset the date fields
-  const [showSuggest, setShowSuggest] = useState(true);
+  const [showSuggest, setShowSuggest] = useState(false);
   const [prompt, setPrompt] = useState(null); // shown when not null
   const [promptError, setPromptError] = useState("");
   const runAbort = useRef(null);
@@ -233,6 +243,22 @@ export default function App() {
       ids.forEach((id) => (on ? selected.add(id) : selected.delete(id)));
       return { ...r, otherSelected: [...selected] };
     });
+
+  // Encounter view: load the member's visits, and the notes of one visit.
+  const loadVisits = async () => {
+    const w = run.result.window || {};
+    const res = await api.encounters(run.result.patient.id, w.start, w.end);
+    setRun((r) => ({ ...r, visits: res.encounters, visitsRequest: res.request, visitsTruncated: res.truncated }));
+  };
+  const loadVisitDocs = async (encounterId) => {
+    const res = await api.encounterDocs(run.result.patient.id, encounterId);
+    setRun((r) => ({
+      ...r,
+      extraDocs: { ...(r.extraDocs || {}), ...Object.fromEntries(res.docs.map((d) => [d.id, d])) },
+      visitDocsLoaded: { ...(r.visitDocsLoaded || {}), [encounterId]: { ids: res.docs.map((d) => d.id), truncated: res.truncated } },
+    }));
+    return res.docs;
+  };
 
   const startOver = () => {
     runAbort.current?.abort();
@@ -444,7 +470,7 @@ export default function App() {
         </section>
 
         <section className={`card ${patients ? "" : "dim"}`}>
-          <h2><span className="num">2</span> Confirm the member</h2>
+          <h2><span className="num">2</span> Member Confirmation</h2>
           {!patients && <p className="hint">Matches for the member you entered appear here.</p>}
           {patients && patients.length === 0 && (
             <div className="banner warn">No patient matches “{name}”{dob ? ` born ${toUS(dob)}` : ""}. Check the spelling, DOB or Patient ID above and try again.</div>
@@ -452,25 +478,13 @@ export default function App() {
           {patients && patients.length > 0 && (
             <>
               <p className="hint">{patients.length === 1 ? "One match, selected." : `${patients.length} matches: pick the right member.`}</p>
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th className="narrow"></th><th>Name</th><th>DOB</th><th>Sex</th><th>Patient ID</th></tr></thead>
-                  <tbody>
-                    {patients.map((p) => (
-                      <tr key={p.id} className={`clickable ${p.id === patientId ? "picked" : ""}`} onClick={() => setPatientId(p.id)}>
-                        <td><input type="radio" name="patient" checked={p.id === patientId} onChange={() => setPatientId(p.id)} /></td>
-                        <td>{p.name}</td><td className="mono">{toUS(p.birthDate)}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <PatientTable patients={patients} patientId={patientId} onPick={setPatientId} />
             </>
           )}
         </section>
 
         <section className={`card ${plan && patientId ? "" : "dim"}`}>
-          <h2><span className="num">3</span> Request, download, package</h2>
+          <h2><span className="num">3</span> Download Package</h2>
           <div className="row wrap">
             <label className="check">
               <input type="checkbox" checked={applyDates} onChange={(e) => setApplyDates(e.target.checked)} />
@@ -486,7 +500,7 @@ export default function App() {
             </label>
             <label className="check" title="On automatically when the service note asks for all medical records">
               <input type="checkbox" checked={includeOther} disabled={!discover} onChange={(e) => setIncludeOther(e.target.checked)} />
-              Put every other record in the packet too
+              <span title="Every record the member has goes in the packet, not only the plan's codes">Download All Record Types</span>
             </label>
             <button className="primary" onClick={fetchAll} disabled={!!busy || !plan || !patientId || selected === 0 || !windowOk}>
               Fetch ({selected} codes)
@@ -497,7 +511,8 @@ export default function App() {
 
           {plan?.all_records && <p className="hint">The service note asks for <b>all medical records</b>: every record the member has goes in the packet (the plan codes plus everything under “Other records”).</p>}
 
-          {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} onToggleOther={toggleOther} rps={health?.fhirMaxRps} />}
+          {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} onToggleOther={toggleOther}
+            onLoadVisits={loadVisits} onLoadVisitDocs={loadVisitDocs} rps={health?.fhirMaxRps} />}
         </section>
       </main>
 
@@ -530,7 +545,30 @@ function PromptView({ prompt, onRefresh, stale }) {
   );
 }
 
+function PatientTable({ patients, patientId, onPick }) {
+  const pager = usePager(patients);
+  return (
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th className="narrow"></th><th>Name</th><th>DOB</th><th>Sex</th><th>Patient ID</th></tr></thead>
+          <tbody>
+            {pager.pageItems.map((p) => (
+              <tr key={p.id} className={`clickable ${p.id === patientId ? "picked" : ""}`} onClick={() => onPick(p.id)}>
+                <td><input type="radio" name="patient" checked={p.id === patientId} onChange={() => onPick(p.id)} /></td>
+                <td>{p.name}</td><td className="mono">{toUS(p.birthDate)}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pager pager={pager} noun="matches" />
+    </>
+  );
+}
+
 function PlanTable({ title, kind, items, options, onToggle, onAdd, codeLabel = "LOINC" }) {
+  const pager = usePager(items);
   return (
     <div className="plan-block">
       <h3>{title}</h3>
@@ -539,7 +577,7 @@ function PlanTable({ title, kind, items, options, onToggle, onAdd, codeLabel = "
           <table>
             <thead><tr><th className="narrow"></th><th>{codeLabel}</th><th>What</th><th>Required</th><th>Why</th></tr></thead>
             <tbody>
-              {items.map((i) => (
+              {pager.pageItems.map((i) => (
                 <tr key={i.code} className={i.on ? "" : "off"}>
                   <td><input type="checkbox" checked={i.on} onChange={() => onToggle(kind, i.code)} aria-label={`Include ${i.code}`} /></td>
                   <td className="mono code">{i.code}</td>
@@ -552,6 +590,7 @@ function PlanTable({ title, kind, items, options, onToggle, onAdd, codeLabel = "
           </table>
         </div>
       )}
+      <Pager pager={pager} noun="codes" />
       {onAdd && options && (
         <select value="" onChange={(e) => onAdd(kind, e.target.value)}>
           <option value="">+ Add a code…</option>
@@ -647,7 +686,9 @@ const DL_LABEL = { ready: "Ready", queued: "Queued", downloading: "Downloading",
 function downloadStatus(d, packet, picked) {
   if (!d.binaryUrl) return { status: "nofile" };
   if (d.duplicate) return { status: "duplicate", error: "Already in the packet under another code" };
-  if (d.matchedBy === "other" && !picked?.has(d.id)) return { status: "notdownloaded", error: "Not in the LOINC plan. Tick it to add it to the packet." };
+  if ((d.matchedBy === "other" || d.matchedBy === "encounter") && !picked?.has(d.id)) {
+    return { status: "notdownloaded", error: "Not in the LOINC plan. Tick it to add it to the packet." };
+  }
   const f = packet?.files?.[d.file];
   return f ? { status: f.status, error: f.error } : { status: "ready" };
 }
@@ -739,6 +780,7 @@ function DocTab({ row, packet }) {
 // unless the reviewer ticks them (or the note asked for all medical records).
 function OtherTab({ r, done, packet, picked, onToggle }) {
   const [open, setOpen] = useState(() => new Set());
+  const groupPager = usePager(r.other || []);
   if (!r.other && !r.otherError) {
     return <p className="hint">{done ? "No other records." : "Listing the member's other records once the plan codes are fetched…"}</p>;
   }
@@ -777,7 +819,7 @@ function OtherTab({ r, done, packet, picked, onToggle }) {
       {groups.length === 0 && !r.otherError && <div className="banner warn">Every record the member has is already covered by the plan.</div>}
 
       <div className="other-groups">
-        {groups.map((g) => {
+        {groupPager.pageItems.map((g) => {
           const ids = selectable(g);
           const n = ids.filter((id) => picked.has(id)).length;
           const isOpen = open.has(g.key);
@@ -802,6 +844,7 @@ function OtherTab({ r, done, packet, picked, onToggle }) {
           );
         })}
       </div>
+      <Pager pager={groupPager} noun="record types" />
     </div>
   );
 }
@@ -842,47 +885,197 @@ function OtherDocs({ docs, packet, picked, onToggle, locked }) {
   );
 }
 
-function EncounterTab({ row }) {
-  const pager = usePager(row.docs);
-  const facilities = [...new Set(row.docs.map((v) => v.facility).filter(Boolean))];
-  return (
-    <div>
-      <div className="tab-head">
-        <div>
-          <b>{row.label}</b> {row.required && <span className="chip warn">required</span>}
-          <div className="hint">{row.count} encounters{facilities.length ? ` at ${facilities.join(", ")}` : ""}. Encounters are listed for evidence; they have no file to download.</div>
-        </div>
+const VISIT_KINDS = [
+  { id: "all", label: "All", classes: null },
+  { id: "inpatient", label: "Inpatient", classes: ["IMP", "ACUTE", "NONAC", "OBSENC", "SS"] },
+  { id: "ed", label: "ED", classes: ["EMER"] },
+  { id: "outpatient", label: "Outpatient", classes: ["AMB", "VR", "HH", "FLD"] },
+];
+
+function encounterIds(doc) {
+  return (doc.encounter || "").split(",").map((ref) => ref.trim().split("/").pop()).filter(Boolean);
+}
+
+// Records grouped by the visit / stay they belong to (DocumentReference.context.encounter).
+function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisitDocs }) {
+  const r = run.result;
+  const [kind, setKind] = useState("all");
+  const [open, setOpen] = useState(() => new Set());
+  const [loading, setLoading] = useState(() => new Set());
+  const [error, setError] = useState("");
+  const [loadingVisits, setLoadingVisits] = useState(false);
+
+  // Visits: from the plan's Encounter groups and/or loaded on demand.
+  const byId = new Map();
+  for (const row of r.rows.filter((x) => x.resource === "Encounter")) row.docs.forEach((v) => byId.set(v.id, v));
+  (run.visits || []).forEach((v) => byId.set(v.id, v));
+  const visits = [...byId.values()].sort((a, b) => ((a.start || "") < (b.start || "") ? 1 : -1));
+
+  // Every note we know about, once: plan rows (in the packet), other records and visit notes.
+  const notes = new Map();
+  for (const row of r.rows.filter((x) => x.resource !== "Encounter")) {
+    row.docs.filter((d) => !d.duplicate).forEach((d) => notes.set(d.id, { ...d, inPlan: true, rowLabel: row.label }));
+  }
+  extraDocs(run).forEach((d) => { if (!notes.has(d.id)) notes.set(d.id, d); });
+  const notesByVisit = new Map();
+  const unlinked = [];
+  for (const d of notes.values()) {
+    const ids = encounterIds(d).filter((id) => byId.has(id));
+    if (!ids.length) unlinked.push(d);
+    ids.forEach((id) => notesByVisit.set(id, [...(notesByVisit.get(id) || []), d]));
+  }
+
+  const kindOf = (v) => VISIT_KINDS.find((k) => k.classes?.includes(v.class))?.id || "other";
+  // One facility per record: inpatient stays whose notes are going in the packet.
+  const packetFacilities = [...new Set(visits
+    .filter((v) => kindOf(v) === "inpatient" && (notesByVisit.get(v.id) || []).some((d) => d.inPlan || picked.has(d.id)))
+    .map((v) => v.facility || "unknown facility"))];
+  const shown = visits.filter((v) => kind === "all" || kindOf(v) === kind);
+  const pager = usePager(shown);
+  const locked = packet?.state === "running";
+
+  const toggleOpen = (id) => setOpen((o) => { const n = new Set(o); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const fetchVisit = async (id) => {
+    setError("");
+    setLoading((l) => new Set(l).add(id));
+    try {
+      await onLoadVisitDocs(id);
+      setOpen((o) => new Set(o).add(id));
+    } catch (e) {
+      setError(`Could not get the notes for visit ${id}: ${e.message}`);
+    } finally {
+      setLoading((l) => { const n = new Set(l); n.delete(id); return n; });
+    }
+  };
+
+  if (!visits.length) {
+    return (
+      <div className="tab-panel">
+        <p className="hint">This plan did not ask for encounters. Load the member's visits and stays in the job window to group records by visit.</p>
+        <button className="primary" disabled={loadingVisits} onClick={async () => {
+          setLoadingVisits(true); setError("");
+          try { await onLoadVisits(); } catch (e) { setError(`Could not load visits: ${e.message}`); } finally { setLoadingVisits(false); }
+        }}>{loadingVisits ? "Loading visits…" : "Load visits"}</button>
+        {error && <div className="banner error small">{error}</div>}
       </div>
-      {row.request && (
-        <div className="request" title="The FHIR search sent to Cerner (all encounters; sorted by class here)">
-          <span className="request-verb">GET</span>
-          <code>{row.request}</code>
+    );
+  }
+
+  return (
+    <div className="tab-panel">
+      <div className="row wrap">
+        <div className="seg" role="group" aria-label="Visit type">
+          {VISIT_KINDS.map((k) => (
+            <button key={k.id} className={kind === k.id ? "active" : ""} onClick={() => { setKind(k.id); pager.setPage(1); }}>
+              {k.label} <span className="muted">{k.id === "all" ? visits.length : visits.filter((v) => kindOf(v) === k.id).length}</span>
+            </button>
+          ))}
+        </div>
+        <span className="hint">Expand a visit to see its notes; “Get all notes for this visit” asks Cerner for every note written for it.</span>
+      </div>
+      {run.visitsTruncated && <div className="banner warn">Only the first pages of visits were read; narrow the date window to see the rest.</div>}
+      {packetFacilities.length > 1 && (
+        <div className="banner warn">
+          <b>Facility check:</b>&nbsp;the packet has inpatient notes from {packetFacilities.join(" and ")}. The request asks for one facility per record.
         </div>
       )}
-      {row.error && <div className="banner error small">{row.error}</div>}
-      {!row.error && row.count === 0 && <div className="banner warn">No encounters of this kind in the window.</div>}
-      {row.docs.length > 0 && (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Start</th><th>End</th><th>Class</th><th>Type</th><th>Facility</th><th>Status</th><th>Encounter</th></tr></thead>
-            <tbody>
-              {pager.pageItems.map((v) => (
-                <tr key={v.id}>
-                  <td className="mono nowrap">{v.start ? toUS(v.start) : "—"}</td>
-                  <td className="mono nowrap">{v.end ? toUS(v.end) : "—"}</td>
-                  <td><span className="chip">{v.class || "?"}</span></td>
-                  <td>{v.type}{v.reason && <div className="muted small">{v.reason}</div>}</td>
-                  <td>{v.facility || <span className="muted">unknown</span>}</td>
-                  <td className="muted">{v.status}{v.dischargeDisposition && <div className="small">{v.dischargeDisposition}</div>}</td>
-                  <td className="mono muted">{v.id}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {error && <div className="banner error small">{error}</div>}
+
+      <div className="other-groups">
+        {pager.pageItems.map((v) => {
+          const vNotes = (notesByVisit.get(v.id) || []).sort((a, b) => ((a.date || "") < (b.date || "") ? 1 : -1));
+          const isOpen = open.has(v.id);
+          const loaded = run.visitDocsLoaded?.[v.id];
+          return (
+            <div key={v.id} className={`other-group ${vNotes.some((d) => d.inPlan || picked.has(d.id)) ? "has-picked" : ""}`}>
+              <div className="other-head">
+                <button className="other-title" onClick={() => toggleOpen(v.id)} aria-expanded={isOpen}>
+                  <span className="trace-caret">{isOpen ? "▾" : "▸"}</span>
+                  <span className="mono">{v.start ? toUS(v.start) : "—"}{v.end && v.end !== v.start ? ` – ${toUS(v.end)}` : ""}</span>
+                  <span className="chip">{v.class || "?"}</span>
+                  <b>{v.type || v.classDisplay || "Visit"}</b>
+                  <span className="muted">{v.facility || "unknown facility"}</span>
+                </button>
+                <span className="tab-count" title="Notes linked to this visit">{vNotes.length}</span>
+              </div>
+              {isOpen && (
+                <div className="other-docs">
+                  <div className="row">
+                    <button className="ghost small-btn" disabled={loading.has(v.id)} onClick={() => fetchVisit(v.id)}>
+                      {loading.has(v.id) ? "Getting notes…" : loaded ? "Get all notes again" : "Get all notes for this visit"}
+                    </button>
+                    {loaded && (
+                      <span className={`hint ${loaded.truncated ? "warn-text" : ""}`}>
+                        {loaded.truncated ? `Showing the first ${loaded.ids.length} notes; this visit has more.` : `Cerner has ${loaded.ids.length} notes for this visit.`}
+                      </span>
+                    )}
+                    <span className="mono muted small">Encounter {v.id}{v.status ? ` · ${v.status}` : ""}</span>
+                  </div>
+                  {vNotes.length === 0 ? <p className="hint">No notes linked to this visit yet.</p> : (
+                    <VisitNotes notes={vNotes} packet={packet} picked={picked} onToggle={onToggle} locked={locked} />
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <Pager pager={pager} noun="visits" />
+
+      {unlinked.length > 0 && (
+        <div className="other-group unlinked">
+          <div className="other-head">
+            <button className="other-title" onClick={() => toggleOpen("__unlinked")} aria-expanded={open.has("__unlinked")}>
+              <span className="trace-caret">{open.has("__unlinked") ? "▾" : "▸"}</span>
+              <b>Not linked to a listed visit</b>
+              <span className="muted">notes with no encounter, or a visit outside the window</span>
+            </button>
+            <span className="tab-count">{unlinked.length}</span>
+          </div>
+          {open.has("__unlinked") && (
+            <div className="other-docs"><VisitNotes notes={unlinked} packet={packet} picked={picked} onToggle={onToggle} locked={locked} /></div>
+          )}
         </div>
       )}
-      <Pager pager={pager} noun="encounters" />
     </div>
+  );
+}
+
+function VisitNotes({ notes, packet, picked, onToggle, locked }) {
+  const pager = usePager(notes);
+  return (
+    <>
+      <div className="table-wrap">
+        <table className="doc-table">
+          <colgroup>
+            <col className="col-check" /><col className="col-date" /><col /><col className="col-author" /><col className="col-status" /><col className="col-file" />
+          </colgroup>
+          <thead><tr><th></th><th>Date</th><th>Title</th><th>Type</th><th>Status</th><th>File</th></tr></thead>
+          <tbody>
+            {pager.pageItems.map((d) => (
+              <tr key={d.id} className={picked.has(d.id) ? "picked" : ""}>
+                <td>
+                  {d.inPlan
+                    ? <span className="in-plan" title="In the packet through the plan">✓</span>
+                    : <input type="checkbox" aria-label={`Add ${d.title} to the packet`} disabled={locked || !d.binaryUrl}
+                        checked={picked.has(d.id)} onChange={(e) => onToggle([d.id], e.target.checked)} />}
+                </td>
+                <td className="mono nowrap">{d.date ? toUS(d.date) : "undated"}</td>
+                <td><b>{d.title || "(untitled)"}</b></td>
+                <td className="muted">{d.rowLabel || (d.loinc?.length ? `LOINC ${d.loinc[0]}` : "no LOINC")}</td>
+                <td><StatusChip {...downloadStatus(d, packet, picked)} /></td>
+                <td className="nowrap">
+                  {d.binaryUrl
+                    ? <a className="open-link" href={api.binaryUrl(d)} target="_blank" rel="noreferrer" title={`Binary: ${d.binaryUrl}`}>Open</a>
+                    : <span className="muted small">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pager pager={pager} noun="notes" />
+    </>
   );
 }
 
@@ -976,26 +1169,76 @@ function PacketProgress({ packet, onSaveAgain }) {
   );
 }
 
-function Results({ run, packet, onPacket, onToggleOther, rps }) {
+function Results({ run, packet, onPacket, onToggleOther, onLoadVisits, onLoadVisitDocs, rps }) {
   const r = run.result;
   const [tab, setTab] = useState("overview");
+  const [view, setView] = useState("type"); // "type" = tabs by document type, "encounter" = by visit
   const picked = new Set(run.otherSelected || []);
   const otherDocs = (r.other || []).flatMap((g) => g.docs);
-  const pickedDocs = otherDocs.filter((d) => picked.has(d.id) && d.binaryUrl);
+  const pickedDocs = extraDocs(run).filter((d) => picked.has(d.id) && d.binaryUrl);
   const notes = [...r.rows.flatMap((row) => row.docs.filter((d) => !d.duplicate && d.binaryUrl)), ...pickedDocs];
   const files = ["00_biographical-sheet.txt", ...[...new Set(notes.map((d) => d.file))].sort(), "missing-items.txt"];
   const missing = r.rows.filter((row) => row.count === 0 && !row.error).length;
   const minutes = rps > 0 ? Math.ceil(notes.length / rps / 60) : 0;
   const docRows = r.rows.filter((row) => row.code !== "clinical-note");
+  const recordRows = docRows.filter((row) => row.resource !== "Encounter"); // visits live in the encounter view
   const sweepError = r.rows.find((row) => row.code === "clinical-note");
-  const current = docRows.find((row) => row.code === tab);
+  const current = recordRows.find((row) => row.code === tab);
   const packetRunning = packet?.state === "running";
   const packetLabel = packetRunning ? "Downloading…" : packet?.state === "ready" ? "Download packet again" : "Download packet (.zip)";
+
+  // Overview rows: every planned code, then other records and results. Paginated like every table.
+  const overviewItems = [
+    ...run.progress.codes.map((c) => ({ key: c.code, render: () => {
+      const row = docRows.find((x) => x.code === c.code);
+      const isVisit = row?.resource === "Encounter";
+      const latest = row?.docs.map((d) => d.date || d.start).filter(Boolean).sort().pop();
+      const open = () => { if (!row?.count) return; if (isVisit) setView("encounter"); else setTab(c.code); };
+      return (
+        <tr key={c.code} className={`${row?.count ? "clickable" : ""} ${row && row.count === 0 ? "missing" : ""}`} onClick={open}
+          title={isVisit && row?.count ? "Open the encounter view" : undefined}>
+          <td className="mono code">{c.code}</td>
+          <td>{c.label}</td>
+          <td>{row?.required ? <span className="chip warn">required</span> : <span className="muted small">{row ? "optional" : ""}</span>}</td>
+          <td>
+            {!row ? <span className="muted">waiting…</span>
+              : row.error ? <span className="bad" title={row.error}>error</span>
+              : row.count ? (row.truncated ? <span title="More exist: raise FHIR_MAX_PAGES or narrow the date window">{row.count}+</span> : row.count)
+              : <span className="bad">missing</span>}
+          </td>
+          <td className="mono">{latest ? toUS(latest) : ""}</td>
+        </tr>
+      );
+    } })),
+    ...(run.progress.discover ? [{ key: "other", render: () => (
+      <tr key="other" className={otherDocs.length ? "clickable" : ""} onClick={() => otherDocs.length && setTab("other")}>
+        <td className="mono code">other</td>
+        <td>Other records (not in the plan)</td>
+        <td></td>
+        <td>
+          {r.otherError ? <span className="bad" title={r.otherError}>error</span>
+            : r.other ? `${otherDocs.length} in ${r.other.length} types` : <span className="muted">waiting…</span>}
+        </td>
+        <td className="muted">{r.other ? (pickedDocs.length ? `${pickedDocs.length} added to the packet` : "Not downloaded") : ""}</td>
+      </tr>
+    ) }] : []),
+    ...(run.progress.observations ? [{ key: "results", render: () => (
+      <tr key="results" className={`${r.observations.length ? "clickable" : ""} ${run.done && !r.observations.length ? "missing" : ""}`}
+        onClick={() => r.observations.length && setTab("results")}>
+        <td className="mono code">results</td>
+        <td>Observations (BP / HbA1c / GMI)</td>
+        <td>{run.plan.observations.some((o) => o.required) ? <span className="chip warn">required</span> : <span className="muted small">optional</span>}</td>
+        <td>{r.observationError ? <span className="bad">error</span> : run.done || r.observations.length ? r.observations.length : <span className="muted">waiting…</span>}</td>
+        <td className="mono">{r.observations[0] ? `${toUS(r.observations[0].date)} · ${r.observations[0].value}` : ""}</td>
+      </tr>
+    ) }] : []),
+  ];
+  const overviewPager = usePager(overviewItems);
 
   const tabs = [
     { id: "overview", label: "Overview" },
     // Only tabs with at least one record; codes with nothing found stay listed in Overview.
-    ...docRows.filter((row) => row.count > 0).map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count })),
+    ...recordRows.filter((row) => row.count > 0).map((row) => ({ id: row.code, label: row.label, count: row.truncated ? `${row.count}+` : row.count })),
     ...(otherDocs.length > 0 ? [{ id: "other", label: "Other records", count: pickedDocs.length ? `${pickedDocs.length}/${otherDocs.length}` : otherDocs.length, state: "other" }] : []),
     ...(r.observations.length > 0 ? [{ id: "results", label: "Results", count: r.observations.length }] : []),
     { id: "packet", label: "Packet", count: run.done ? files.length : undefined },
@@ -1020,6 +1263,19 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
       {!run.done && <Progress progress={run.progress} />}
       {packet && <PacketProgress packet={packet} onSaveAgain={() => api.packetSave(packet.job)} />}
 
+      <div className="view-switch row">
+        <div className="seg" role="group" aria-label="Group results">
+          <button className={view === "type" ? "active" : ""} onClick={() => setView("type")}>By document type</button>
+          <button className={view === "encounter" ? "active" : ""} onClick={() => setView("encounter")} disabled={!run.done}
+            title={run.done ? "" : "Available once the fetch finishes"}>By encounter</button>
+        </div>
+        <span className="hint">{view === "type" ? "Records grouped by what they are." : "Records grouped by the visit or stay they belong to."}</span>
+      </div>
+
+      {view === "encounter" ? (
+        <EncounterView run={run} packet={packet} picked={picked} onToggle={onToggleOther}
+          onLoadVisits={onLoadVisits} onLoadVisitDocs={onLoadVisitDocs} />
+      ) : (<>
       <div className="tabs" role="tablist">
         {tabs.map((t) => (
           <button key={t.id} role="tab" aria-selected={tab === t.id}
@@ -1055,55 +1311,16 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
               <table>
                 <thead><tr><th>Code</th><th>What</th><th>Required</th><th>Found</th><th>Latest</th></tr></thead>
                 <tbody>
-                  {run.progress.codes.map((c) => {
-                    const row = docRows.find((x) => x.code === c.code);
-                    const latest = row?.docs.map((d) => d.date || d.start).filter(Boolean).sort().pop();
-                    return (
-                      <tr key={c.code} className={`${row?.count ? "clickable" : ""} ${row && row.count === 0 ? "missing" : ""}`} onClick={() => row?.count && setTab(c.code)}>
-                        <td className="mono code">{c.code}</td>
-                        <td>{c.label}</td>
-                        <td>{row?.required ? <span className="chip warn">required</span> : <span className="muted small">{row ? "optional" : ""}</span>}</td>
-                        <td>
-                          {!row ? <span className="muted">waiting…</span>
-                            : row.error ? <span className="bad" title={row.error}>error</span>
-                            : row.count ? (row.truncated ? <span title="More exist: raise FHIR_MAX_PAGES or narrow the date window">{row.count}+</span> : row.count)
-                            : <span className="bad">missing</span>}
-                        </td>
-                        <td className="mono">{latest ? toUS(latest) : ""}</td>
-                      </tr>
-                    );
-                  })}
-                  {run.progress.discover && (
-                    <tr className={otherDocs.length ? "clickable" : ""} onClick={() => otherDocs.length && setTab("other")}>
-                      <td className="mono code">other</td>
-                      <td>Other records (not in the plan)</td>
-                      <td></td>
-                      <td>
-                        {r.otherError ? <span className="bad" title={r.otherError}>error</span>
-                          : r.other ? `${otherDocs.length} in ${r.other.length} types` : <span className="muted">waiting…</span>}
-                      </td>
-                      <td className="muted">{r.other ? (pickedDocs.length ? `${pickedDocs.length} added to the packet` : "Not downloaded") : ""}</td>
-                    </tr>
-                  )}
-                  {run.progress.observations && (
-                    <tr className={`${r.observations.length ? "clickable" : ""} ${run.done && !r.observations.length ? "missing" : ""}`}
-                      onClick={() => r.observations.length && setTab("results")}>
-                      <td className="mono code">results</td>
-                      <td>Observations (BP / HbA1c / GMI)</td>
-                      <td>{run.plan.observations.some((o) => o.required) ? <span className="chip warn">required</span> : <span className="muted small">optional</span>}</td>
-                      <td>{r.observationError ? <span className="bad">error</span> : run.done || r.observations.length ? r.observations.length : <span className="muted">waiting…</span>}</td>
-                      <td className="mono">{r.observations[0] ? `${toUS(r.observations[0].date)} · ${r.observations[0].value}` : ""}</td>
-                    </tr>
-                  )}
+                  {overviewPager.pageItems.map((item) => item.render())}
                 </tbody>
               </table>
             </div>
-            <p className="hint">Click a row or a tab to see its records. Codes with nothing found have no tab; they are listed here and on the missing-items sheet.</p>
+            <Pager pager={overviewPager} noun="rows" />
+            <p className="hint">Click a row or a tab to see its records; visits and stays open the encounter view. Codes with nothing found have no tab; they are listed here and on the missing-items sheet.</p>
           </>
         )}
 
-        {current && current.resource === "Encounter" && <EncounterTab key={current.code} row={current} />}
-        {current && current.resource !== "Encounter" && <DocTab key={current.code} row={current} packet={packet} />}
+        {current && <DocTab key={current.code} row={current} packet={packet} />}
 
         {tab === "other" && <OtherTab r={r} done={run.done} packet={packet} picked={picked} onToggle={onToggleOther} />}
 
@@ -1125,6 +1342,7 @@ function Results({ run, packet, onPacket, onToggleOther, rps }) {
           </div>
         )}
       </div>
+      </>)}
     </div>
   );
 }
