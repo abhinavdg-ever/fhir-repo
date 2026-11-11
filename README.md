@@ -78,7 +78,7 @@ uvicorn agent.app:app --port 8000
 
 Line endings are normalised by `.gitattributes`, so a Windows clone works without changes. The text sheets in the packet use Windows line endings.
 
-UI work (Node 18+): `cd frontend && npm install && npm run dev`, then open http://localhost:5173 (it proxies `/api` to :8000). Run `npm run build` to refresh `frontend/dist`.
+UI work (Node 18+): start the backend first (`.\run.cmd -Dev`), then in a second window `cd frontend && npm install && npm run dev`, and open **http://127.0.0.1:5173**. It proxies `/api` to `http://127.0.0.1:8000` (IPv4 on purpose: on Windows `localhost` can resolve to IPv6 `::1`, which the backend doesn't listen on). Backend on another port: `$env:API_TARGET="http://127.0.0.1:8020"; npm run dev`. Run `npm run build` to refresh `frontend/dist`.
 
 ## Try Cerner with curl
 
