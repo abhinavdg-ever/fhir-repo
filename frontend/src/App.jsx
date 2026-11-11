@@ -252,7 +252,12 @@ export default function App() {
   const loadVisits = async () => {
     const w = run.result.window || {};
     try {
-      const res = await api.encounters(run.result.patient.id, w.start, w.end);
+      // Also ask for the visits the fetched notes point to, so they show even when Cerner's
+      // listing is all undated registrations.
+      const known = new Set(run.result.rows.filter((x) => x.resource === "Encounter").flatMap((x) => x.docs.map((v) => v.id)));
+      const linked = [...new Set(run.result.rows.flatMap((x) => x.docs).concat(extraDocs(run))
+        .flatMap((d) => encounterIds(d)))].filter((id) => !known.has(id)).slice(0, 200);
+      const res = await api.encounters(run.result.patient.id, w.start, w.end, linked);
       setRun((r) => ({ ...r, visits: res.encounters, visitsRequest: res.request, visitsTruncated: res.truncated }));
     } finally {
       trace.refresh();
@@ -919,7 +924,7 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
   const [loading, setLoading] = useState(() => new Set());
   const [error, setError] = useState("");
   const [loadingVisits, setLoadingVisits] = useState(false);
-  const hasEncounterRows = r.rows.some((x) => x.resource === "Encounter");
+  const hasEncounterRows = r.rows.some((x) => x.resource === "Encounter" && x.count > 0);
   const visitsLoaded = Array.isArray(run.visits);
 
   // Plans without Encounter groups: load the member's visits as soon as this view opens.
@@ -943,7 +948,11 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
   const byId = new Map();
   for (const row of r.rows.filter((x) => x.resource === "Encounter")) row.docs.forEach((v) => byId.set(v.id, v));
   (run.visits || []).forEach((v) => byId.set(v.id, v));
-  const visits = [...byId.values()].sort((a, b) => ((a.start || "") < (b.start || "") ? 1 : -1));
+  // Newest first; visits without a date go last.
+  const allVisits = [...byId.values()].sort((a, b) => {
+    if (!a.start !== !b.start) return a.start ? -1 : 1;
+    return (a.start || "") < (b.start || "") ? 1 : -1;
+  });
 
   // Every note we know about, once: plan rows (in the packet), other records and visit notes.
   const notes = new Map();
@@ -960,6 +969,8 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
   }
 
   const kindOf = (v) => VISIT_KINDS.find((k) => k.classes?.includes(v.class))?.id || "other";
+  // Blank encounters (no date and no notes, e.g. open registrations) are not shown.
+  const visits = allVisits.filter((v) => v.start || (notesByVisit.get(v.id) || []).length);
   // One facility per record: inpatient stays whose notes are going in the packet.
   const packetFacilities = [...new Set(visits
     .filter((v) => kindOf(v) === "inpatient" && (notesByVisit.get(v.id) || []).some((d) => d.inPlan || picked.has(d.id)))
@@ -1015,7 +1026,13 @@ function EncounterView({ run, packet, picked, onToggle, onLoadVisits, onLoadVisi
         </div>
         <span className="hint">Expand a visit to see its notes; “Get all notes for this visit” asks Cerner for every note written for it.</span>
       </div>
-      {run.visitsTruncated && <div className="banner warn">Only the first pages of visits were read; narrow the date window to see the rest.</div>}
+      {run.visitsTruncated && (
+        <div className="banner warn">
+          Cerner's visit list for this member is longer than the pages read (much of it undated registrations).
+          Every visit your fetched notes belong to is included regardless.
+        </div>
+      )}
+
       {packetFacilities.length > 1 && (
         <div className="banner warn">
           <b>Facility check:</b>&nbsp;the packet has inpatient notes from {packetFacilities.join(" and ")}. The request asks for one facility per record.

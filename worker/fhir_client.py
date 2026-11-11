@@ -256,6 +256,14 @@ class FhirClient:
         params = [("patient", pid), ("category", category), ("_count", "100")]
         return await self.search("DiagnosticReport", params + self._timestamp_window(start, end))
 
+    async def encounters_by_ids(self, ids: list[str], chunk: int = 20) -> list[dict]:
+        """Specific encounters (e.g. the visits notes point to). Cerner takes _id on its own, not with patient."""
+        clean = [i for i in dict.fromkeys(ids) if i and i.replace("-", "").isalnum()]
+        found: list[dict] = []
+        for n in range(0, len(clean), chunk):
+            found += await self.search("Encounter", [("_id", ",".join(clean[n:n + chunk]))], max_pages=1)
+        return found
+
     async def encounters(self, pid: str, start: str | None, end: str | None) -> SearchResults:
         # Cerner ignores ?class=, so every encounter comes back and is sorted by class afterwards.
         params = [("patient", pid), ("_count", "100")]

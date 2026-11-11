@@ -195,11 +195,22 @@ async def run_job_events(c: FhirClient, req: RunRequest):
             for e in found:
                 if e.get("status") != "entered-in-error":
                     encounters_by_id[e.get("id")] = encounter_summary(e)
+            # The visits the fetched notes belong to, looked up by id: Cerner's encounter listing can be
+            # hundreds of undated registrations deep, so real stays may never appear in it.
+            linked = {ref.rsplit("/", 1)[-1] for row in rows_by_code.values() for d in row["docs"]
+                      for ref in (d.get("encounter") or "").split(",") if ref.strip()}
+            missing = sorted(i for i in linked if i not in encounters_by_id)
+            if missing:
+                for e in await c.encounters_by_ids(missing):
+                    if e.get("status") != "entered-in-error":
+                        encounters_by_id[e.get("id")] = {**encounter_summary(e), "linked": True}
         except FhirError as e:
             enc_error = str(e)
         for item in p.encounters:
             classes = set(PURPOSES["Encounter"].get(item.code, {}).get("codes", []))
-            visits = sorted((v for v in encounters_by_id.values() if v["class"] in classes),
+            # Undated registrations with no notes are noise; keep dated visits and any visit a note points to.
+            visits = sorted((v for v in encounters_by_id.values()
+                             if v["class"] in classes and (v["start"] or v.get("linked"))),
                             key=lambda v: v["start"] or "", reverse=True)
             row = {"code": item.code, "label": item.label, "reason": item.reason, "group": item.group,
                    "required": item.required, "resource": "Encounter", "error": enc_error,

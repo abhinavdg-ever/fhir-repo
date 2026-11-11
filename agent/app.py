@@ -150,14 +150,22 @@ async def run_stream(req: RunRequest):
 
 
 @app.get("/api/encounters")
-async def encounters(patient: str, start: str | None = None, end: str | None = None):
+async def encounters(patient: str, start: str | None = None, end: str | None = None, ids: str = ""):
+    """The member's visits in the window, plus `ids` (comma-separated: the visits notes point to)."""
     c = client()
     try:
         found = await c.encounters(patient, start, end)
-        visits = [encounter_summary(e) for e in found if e.get("status") != "entered-in-error"]
-        visits.sort(key=lambda v: v["start"] or "", reverse=True)
-        return {"encounters": visits, "request": getattr(found, "request_url", ""),
-                "truncated": getattr(found, "truncated", False)}
+        visits = {e.get("id"): encounter_summary(e) for e in found if e.get("status") != "entered-in-error"}
+        wanted = [i.strip() for i in ids.split(",") if i.strip() and i.strip() not in visits]
+        if wanted:
+            for e in await c.encounters_by_ids(wanted):
+                subject = ((e.get("subject") or {}).get("reference") or "").rsplit("/", 1)[-1]
+                if e.get("status") != "entered-in-error" and (not subject or subject == patient):
+                    visits[e.get("id")] = {**encounter_summary(e), "linked": True}
+        ordered = sorted(visits.values(), key=lambda v: v["start"] or "", reverse=True)
+        return {"encounters": ordered, "request": getattr(found, "request_url", ""),
+                "truncated": getattr(found, "truncated", False),
+                "undated": sum(1 for v in ordered if not v["start"] and not v.get("linked"))}
     except FhirError as e:
         raise HTTPException(502, str(e))
     finally:

@@ -454,6 +454,7 @@ tr.missing { background: var(--bad-bg); }
 .intent-json { margin-top: 0.6rem; }
 .view-switch { margin-top: 0.9rem; }
 .other-group.unlinked { margin-top: 0.6rem; border-style: dashed; }
+.link-btn { background: none; border: none; padding: 0; color: var(--primary); font-weight: 600; font-size: inherit; cursor: pointer; text-decoration: underline; }
 .in-plan { color: var(--ok-fg); font-weight: 700; cursor: help; padding-left: 0.2rem; }
 pre.json {
   margin: 0.4rem 0 0;
