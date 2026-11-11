@@ -29,6 +29,13 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+if os.getenv("USE_SYSTEM_CERTS", "").strip().lower() in ("1", "true", "yes"):
+    # Trust the OS certificate store (Windows / macOS keychain) instead of certifi's bundle.
+    # Needed on corporate networks that inspect HTTPS with their own root certificate.
+    import truststore
+
+    truststore.inject_into_ssl()
+
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402

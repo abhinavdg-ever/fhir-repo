@@ -229,18 +229,37 @@ class FhirClient:
 
     # ---- Binary ----
     async def download_binary(self, url: str, content_type: str | None) -> tuple[bytes, str]:
-        """Ask for the raw file first (Accept = attachment.contentType).
-        If the server refuses, ask for the FHIR Binary JSON and decode its base64 `data`."""
+        """Fetch a note's file from its Binary URL.
+
+        Cerner only accepts the file's own media type or application/fhir+json in
+        Accept; anything else (e.g. a browser's */*) gets 406 "The Accept Header is
+        invalid". So ask for the raw file with its exact type first, and on any
+        refusal ask for the FHIR Binary JSON and decode its base64 `data`.
+        """
         target = self.url(url)
-        if content_type:
-            r = await self._get(target, headers={"Accept": content_type})
+        raw_type = clean_media_type(content_type)
+        first_error = ""
+        if raw_type and raw_type != FHIR_JSON:
+            r = await self._get(target, headers={"Accept": raw_type})
             if r.status_code < 400 and not r.headers.get("content-type", "").startswith(FHIR_JSON):
-                return r.content, r.headers.get("content-type", content_type).split(";")[0]
+                return r.content, clean_media_type(r.headers.get("content-type")) or raw_type
+            if r.status_code >= 400:
+                first_error = f"Accept {raw_type} -> HTTP {r.status_code}; "
         r = await self._get(target, headers={"Accept": FHIR_JSON})
         if r.status_code >= 400:
-            raise FhirError(r.status_code, r.request.url, r.text[:500])
+            raise FhirError(r.status_code, r.request.url, f"{first_error}Accept {FHIR_JSON} -> {r.text[:400]}")
         body = r.json()
-        return base64.b64decode(body.get("data", "")), body.get("contentType", content_type or "application/octet-stream")
+        return base64.b64decode(body.get("data", "")), body.get("contentType") or raw_type or "application/octet-stream"
+
+
+def clean_media_type(value: str | None) -> str | None:
+    """'text/plain; charset=UTF-8' -> 'text/plain'. Wildcards and blanks -> None (Cerner rejects them)."""
+    if not value:
+        return None
+    media = value.split(";", 1)[0].strip().lower()
+    if not media or "*" in media or "/" not in media:
+        return None
+    return media
 
 
 class FhirError(Exception):

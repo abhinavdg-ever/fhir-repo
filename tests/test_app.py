@@ -260,3 +260,39 @@ def test_packet_job_reports_per_file_status_and_serves_zip(monkeypatch):
         assert z.headers["X-Download-Errors"] == "1"
         names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
         assert "2026-01-01_Note_1.pdf" in names and "download-errors.txt" in names
+
+
+def test_binary_accept_is_never_a_wildcard(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from worker import fhir_client
+
+    seen = []
+
+    def handler(request):
+        accept = request.headers["Accept"]
+        seen.append(accept)
+        if accept == "application/fhir+json":
+            return httpx.Response(200, json={"resourceType": "Binary", "contentType": "text/plain", "data": "aGk="})
+        if accept in ("text/plain", "application/pdf"):
+            return httpx.Response(200, content=b"hi", headers={"content-type": accept})
+        return httpx.Response(406, json={"resourceType": "OperationOutcome"})
+
+    monkeypatch.setenv("FHIR_MAX_RPS", "0")
+    async def go(ctype):
+        seen.clear()
+        c = fhir_client.FhirClient("https://fhir.example.cerner.com/r4/t")
+        c.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            return await c.download_binary("https://fhir.example.cerner.com/r4/t/Binary/XR-1", ctype), list(seen)
+        finally:
+            await c.close()
+
+    (data, ctype), calls = asyncio.run(go("text/plain; charset=UTF-8"))
+    assert (data, ctype, calls) == (b"hi", "text/plain", ["text/plain"])
+    (data, ctype), calls = asyncio.run(go("*/*"))
+    assert (data, calls) == (b"hi", ["application/fhir+json"])
+    (data, ctype), calls = asyncio.run(go("application/rtf"))  # refused -> falls back to FHIR JSON
+    assert (data, calls) == (b"hi", ["application/rtf", "application/fhir+json"])

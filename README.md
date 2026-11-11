@@ -36,21 +36,47 @@ requirements.txt
 
 ## Run it
 
-From the repo root (Python 3.10+):
+Needs **Python 3.10+**. Node is only needed to change the UI — the built UI in `frontend/dist` is committed and served by the API.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env               # then fill in AOAI_ENDPOINT and AOAI_API_KEY
-uvicorn agent.app:app --reload --port 8000
+**Windows** (PowerShell or Command Prompt, from the repo folder):
+
+```powershell
+.\run.cmd            # first run creates .venv, installs requirements and .env; then serves the app
+.\run.cmd -Dev       # auto-reload while editing code
+.\run.cmd -Mock      # also start the offline mock FHIR server on :9000
+.\run.cmd -Test      # run the tests
 ```
 
-Open **http://localhost:8000** — the built UI in `frontend/dist` is served by the API.
+`run.cmd` calls `run.ps1` with `-ExecutionPolicy Bypass`, so it works even where PowerShell blocks scripts. It finds Python through the `py` launcher (or `python` on PATH).
 
-Working on the UI (Node 18+): `cd frontend && npm install && npm run dev`, then open http://localhost:5173 (it proxies `/api` to :8000). Run `npm run build` to refresh `frontend/dist`.
+**macOS / Linux:** `./run.sh` (same options: `--dev`, `--mock`, `--test`).
 
-Tests: `pytest -q tests`
+Then open **http://localhost:8000** and fill in `AOAI_ENDPOINT` / `AOAI_API_KEY` in `.env` to use Azure OpenAI.
+
+Manual setup, if you prefer:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate           # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+copy .env.example .env            # macOS/Linux: cp .env.example .env
+uvicorn agent.app:app --port 8000
+```
+
+### Deploying on a Windows machine
+
+| Need | Do this |
+| --- | --- |
+| Others on the network open the app | `APP_HOST=0.0.0.0` in `.env`, and allow the port in Windows Defender Firewall: `New-NetFirewallRule -DisplayName "FHIR Retrieval" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow` (admin PowerShell) |
+| A different port | `APP_PORT=8080` in `.env`, or `$env:APP_PORT="8080"; .\run.ps1` |
+| `CERTIFICATE_VERIFY_FAILED` to Cerner or Azure | Corporate HTTPS inspection: set `USE_SYSTEM_CERTS=true` so the Windows certificate store is used |
+| A proxy | Set `HTTPS_PROXY=http://proxy:port` (and `NO_PROXY=localhost,127.0.0.1`) before starting; httpx and the OpenAI SDK honour them |
+| Keep it running after logoff | Run `run.cmd` from Task Scheduler ("At startup", "Run whether user is logged on or not"), or wrap it with a service manager such as NSSM |
+| Edit `.env` | Any editor is fine; save as UTF-8 (Notepad's default) |
+
+Line endings are normalised by `.gitattributes`, so a Windows clone works without changes. The text sheets in the packet use Windows line endings.
+
+UI work (Node 18+): `cd frontend && npm install && npm run dev`, then open http://localhost:5173 (it proxies `/api` to :8000). Run `npm run build` to refresh `frontend/dist`.
 
 ## Playing with the model (`.env`)
 
@@ -72,6 +98,7 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 - Type `12724066` in the patient box to load that test patient. A name search needs the date of birth too, as mm/dd/yyyy (e.g. `Tim Peters` + 09/15/1990). Dates in the UI and packet sheets are mm/dd/yyyy.
 - Sandbox notes are often outside the window — untick **Apply date window**.
 - Tick **Also match notes by title** to catch notes with no LOINC on `type`.
+- `Binary` only accepts the file's own media type or `application/fhir+json` in `Accept`; anything else (e.g. a browser's `*/*`) gets **406 "The Accept Header is invalid"**. The app sends the exact type and falls back to FHIR JSON, so open notes through **Open** (which goes via `/api/binary`), not by pasting the Binary URL into a browser.
 - The open sandbox rate-limits (HTTP 429). Requests are spaced out and retried automatically; tune it in `.env`:
 
 | Variable | Default | What it does |

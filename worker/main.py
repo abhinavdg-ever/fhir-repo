@@ -196,6 +196,10 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
 def packet_docs(result: dict) -> dict[str, dict]:
     """The notes that go in the packet, keyed by file name (duplicates and file-less notes skipped)."""
     out: dict[str, dict] = {}
@@ -245,11 +249,12 @@ async def build_packet(c: FhirClient, plan: Plan, result: dict, on_status=None) 
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("00_biographical-sheet.txt", bio_sheet(pt))
+        # The sheets use Windows line endings so they read correctly in any Notepad.
+        z.writestr("00_biographical-sheet.txt", crlf(bio_sheet(pt)))
         for name, data in sorted(files):
             z.writestr(name, data)
-        z.writestr("missing-items.txt", missing_sheet(pt, plan, result))
+        z.writestr("missing-items.txt", crlf(missing_sheet(pt, plan, result)))
         if errors:
-            z.writestr("download-errors.txt", "\n".join(errors) + "\n")
+            z.writestr("download-errors.txt", crlf("\n".join(errors) + "\n"))
     buf.seek(0)
     return buf, zip_name_for(result), len(errors)

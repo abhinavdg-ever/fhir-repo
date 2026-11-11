@@ -4,6 +4,7 @@ pydantic==2.*
 httpx==0.27.*
 openai==1.*
 python-dotenv==1.*
+truststore==0.10.*        # only used when USE_SYSTEM_CERTS=true (corporate HTTPS inspection)
 # Optional: only needed for Entra ID (az login / managed identity) instead of an API key
 # azure-identity==1.*
 
