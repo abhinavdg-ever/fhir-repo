@@ -21,6 +21,9 @@ from common.models import Plan, RunRequest
 from worker.fhir_client import FhirClient, FhirError, doc_summary, obs_summary, patient_summary
 
 CONCURRENCY = int(os.getenv("FHIR_CONCURRENCY", "2") or 2)  # LOINC searches in flight at once
+# Binary downloads in flight at once. Each sandbox Binary call takes ~4 s whatever its size,
+# so downloads need more parallelism than searches; FHIR_MAX_RPS still caps the request rate.
+DOWNLOAD_CONCURRENCY = int(os.getenv("FHIR_DOWNLOAD_CONCURRENCY", "10") or 10)
 EXT = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "html",
        "text/plain": "txt", "application/xml": "xml", "text/xml": "xml",
        "text/rtf": "rtf", "application/rtf": "rtf", "image/jpeg": "jpg", "image/png": "png",
@@ -83,14 +86,14 @@ async def run_job_events(c: FhirClient, req: RunRequest):
             try:
                 docs = await c.documents_by_loinc(req.patient_id, item.code, start, end)
                 kept = [d for d in docs if d.get("status") != "entered-in-error"]
-                return item, kept, None, getattr(docs, "truncated", False)
+                return item, kept, None, docs
             except FhirError as e:
-                return item, [], str(e), False
+                return item, [], str(e), None
 
     seen: set[str] = set()
     rows_by_code: dict[str, dict] = {}
     for next_done in asyncio.as_completed([by_code(i) for i in p.documents]):
-        item, docs, err, truncated = await next_done
+        item, docs, err, raw = await next_done
         summaries = []
         for d in docs:
             s = doc_summary(d)
@@ -100,7 +103,8 @@ async def run_job_events(c: FhirClient, req: RunRequest):
             seen.add(s["id"])
             summaries.append(s)
         row = {"code": item.code, "label": item.label, "reason": item.reason,
-               "count": len(summaries), "error": err, "docs": summaries, "truncated": truncated}
+               "count": len(summaries), "error": err, "docs": summaries,
+               "truncated": getattr(raw, "truncated", False), "request": getattr(raw, "request_url", "")}
         rows_by_code[item.code] = row
         yield {"type": "row", "row": row}
 
@@ -192,42 +196,60 @@ def missing_sheet(pt: dict, plan: Plan, result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def build_packet(c: FhirClient, plan: Plan, result: dict) -> tuple[io.BytesIO, str, int]:
-    """Return (zip buffer, file name, number of failed downloads)."""
-    pt = result.get("patient") or {}
-    docs = [d for r in result.get("rows", []) for d in r.get("docs", [])
-            if not d.get("duplicate") and d.get("binaryUrl")]
-    sem = asyncio.Semaphore(CONCURRENCY)
-    errors: list[str] = []
+def packet_docs(result: dict) -> dict[str, dict]:
+    """The notes that go in the packet, keyed by file name (duplicates and file-less notes skipped)."""
+    out: dict[str, dict] = {}
+    for r in result.get("rows", []):
+        for d in r.get("docs", []):
+            if d.get("duplicate") or not d.get("binaryUrl"):
+                continue
+            out.setdefault(d.get("file") or file_name(d, r.get("label", "note")), d)
+    return out
 
-    async def fetch(d):
-        name = d.get("file") or file_name(d, "note")
+
+def zip_name_for(result: dict) -> str:
+    pt = result.get("patient") or {}
+    return f"{safe(pt.get('name', 'member')) or 'member'}_{pt.get('birthDate') or 'nodob'}_packet.zip"
+
+
+async def build_packet(c: FhirClient, plan: Plan, result: dict, on_status=None) -> tuple[io.BytesIO, str, int]:
+    """Download every packet note and zip it with the sheets. Returns (zip buffer, file name, failures).
+
+    on_status(file_name, status, error) is called as each file moves through
+    "downloading" -> "done" | "failed", so a caller can show per-file progress.
+    """
+    pt = result.get("patient") or {}
+    docs = packet_docs(result)
+    sem = asyncio.Semaphore(max(1, DOWNLOAD_CONCURRENCY))
+    errors: list[str] = []
+    report = on_status or (lambda name, status, error=None: None)
+
+    async def fetch(name: str, d: dict):
         if not binary_allowed(d["binaryUrl"], c.base):
             errors.append(f"{name}: URL not allowed")
+            report(name, "failed", "URL not allowed")
             return None
         async with sem:
+            report(name, "downloading")
             try:
                 data, _ = await c.download_binary(d["binaryUrl"], d.get("contentType"))
-                return name, data
             except Exception as e:  # keep going; list it in download-errors.txt
-                errors.append(f"{name}: {str(e)[:300]}")
+                message = str(e)[:300]
+                errors.append(f"{name}: {message}")
+                report(name, "failed", message)
                 return None
+            report(name, "done")
+            return name, data
 
-    files = [f for f in await asyncio.gather(*(fetch(d) for d in docs)) if f]
+    files = [f for f in await asyncio.gather(*(fetch(n, d) for n, d in docs.items())) if f]
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("00_biographical-sheet.txt", bio_sheet(pt))
-        used: set[str] = set()
         for name, data in sorted(files):
-            if name in used:  # the same note can be listed twice; keep one copy
-                continue
-            used.add(name)
             z.writestr(name, data)
         z.writestr("missing-items.txt", missing_sheet(pt, plan, result))
         if errors:
             z.writestr("download-errors.txt", "\n".join(errors) + "\n")
     buf.seek(0)
-
-    zip_name = f"{safe(pt.get('name', 'member')) or 'member'}_{pt.get('birthDate') or 'nodob'}_packet.zip"
-    return buf, zip_name, len(errors)
+    return buf, zip_name_for(result), len(errors)

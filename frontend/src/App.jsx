@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
+import { TraceDock, useTrace } from "./trace.jsx";
 import { DateInput, toUS } from "./dates.jsx";
 
 const SAMPLES = {
@@ -29,7 +30,7 @@ function demoPatientsFor(fhirBase = "") {
   return [];
 }
 
-const checkedOnly =(items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
+const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
 
 export default function App() {
   const [health, setHealth] = useState(null);
@@ -43,10 +44,17 @@ export default function App() {
   const [patientId, setPatientId] = useState("");
   const [applyDates, setApplyDates] = useState(true);
   const [titleFallback, setTitleFallback] = useState(false);
-  const [run, setRun] = useState(null); // { plan: plan as sent, result }
+  const [run, setRun] = useState(null); // { id, plan as sent, result, progress, done }
+  const [packet, setPacket] = useState(null); // { runId, job, state, files, counts, failed, error }
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const [traceOpen, setTraceOpen] = useState(true);
+  const [formKey, setFormKey] = useState(0); // bumps on Start over to reset the date fields
+  const runAbort = useRef(null);
+
+  const packetRunning = packet?.state === "running";
+  const trace = useTrace(!!busy || packetRunning);
 
   useEffect(() => {
     api.health()
@@ -58,32 +66,79 @@ export default function App() {
     api.catalog().then(setCatalog).catch(() => {});
   }, []);
 
+  // Poll the background packet job until it finishes, then save the zip.
+  useEffect(() => {
+    if (!packetRunning) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const s = await api.packetStatus(packet.job);
+        setPacket((p) => (p && p.job === s.job ? { ...p, ...s } : p));
+        if (s.state === "ready") {
+          api.packetSave(s.job);
+          setInfo(s.failed
+            ? `Packet saved. ${s.failed} file(s) failed to download; see download-errors.txt in the zip.`
+            : `Packet saved: ${s.zipName}`);
+        } else if (s.state === "failed") {
+          setError(`Packet failed: ${s.error}`);
+        }
+      } catch (e) {
+        setPacket((p) => (p ? { ...p, state: "failed", error: e.message } : p));
+        setError(`Packet failed: ${e.message}`);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [packetRunning, packet?.job]);
+
+  // Each request starts with a fresh trace and clean banners.
   async function step(label, fn) {
+    trace.clear();
     setError("");
     setInfo("");
     setBusy(label);
     try {
       await fn();
     } catch (e) {
-      setError(e.message);
+      if (e.name !== "AbortError") setError(e.message);
     } finally {
       setBusy("");
     }
   }
 
-  const translate = () =>
+  const isPatientId = /^\d+$/.test(name.trim());
+  const needsDob = name.trim() !== "" && !isPatientId && !dob;
+  const patientReady = name.trim() !== "" && !needsDob;
+  const canStart = !busy && note.trim() !== "" && patientReady;
+
+  // Translate the note and look up the member at the same time.
+  const start = () =>
+    step(useLlm ? "Asking Azure OpenAI to read the service note and looking up the member…" : "Mapping the note and looking up the member…", async () => {
+      setRun(null);
+      setPlan(null);
+      setPatients(null);
+      setPatientId("");
+      const [planRes, patientsRes] = await Promise.allSettled([api.plan(note, useLlm), api.patients(name.trim(), dob)]);
+      const problems = [];
+      if (planRes.status === "fulfilled") {
+        const on = (items) => items.map((i) => ({ ...i, on: true }));
+        setPlan({ ...planRes.value, documents: on(planRes.value.documents), observations: on(planRes.value.observations) });
+      } else {
+        problems.push(`Service note: ${planRes.reason.message}`);
+      }
+      if (patientsRes.status === "fulfilled") {
+        setPatients(patientsRes.value);
+        setPatientId(patientsRes.value.length === 1 ? patientsRes.value[0].id : "");
+      } else {
+        problems.push(`Patient: ${patientsRes.reason.message}`);
+      }
+      if (problems.length) throw new Error(problems.join(" · "));
+    });
+
+  const retranslate = () =>
     step(useLlm ? "Asking Azure OpenAI to read the service note…" : "Applying keyword rules…", async () => {
       const p = await api.plan(note, useLlm);
       const on = (items) => items.map((i) => ({ ...i, on: true }));
       setPlan({ ...p, documents: on(p.documents), observations: on(p.observations) });
       setRun(null);
-    });
-
-  const findPatients = (query = name, birthdate = dob) =>
-    step("Searching patients…", async () => {
-      const list = await api.patients(query.trim(), birthdate);
-      setPatients(list);
-      setPatientId(list.length === 1 ? list[0].id : "");
     });
 
   const fetchAll = () =>
@@ -92,6 +147,7 @@ export default function App() {
       const order = sent.documents.map((d) => d.code);
       const byPlanOrder = (rows) => [...rows].sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
       setRun(null);
+      runAbort.current = new AbortController();
       await api.runStream(
         { patient_id: patientId, plan: sent, apply_dates: applyDates, title_fallback: titleFallback },
         (ev) => {
@@ -104,10 +160,11 @@ export default function App() {
               result: { patient: ev.patient, window: ev.window, rows: [], observations: [], observationError: null, missing: [] },
             });
           } else if (ev.type === "row") {
-            setRun((r) => {
-              const finished = [...r.progress.finished, ev.row.code];
-              return { ...r, progress: { ...r.progress, finished }, result: { ...r.result, rows: byPlanOrder([...r.result.rows, ev.row]) } };
-            });
+            setRun((r) => ({
+              ...r,
+              progress: { ...r.progress, finished: [...r.progress.finished, ev.row.code] },
+              result: { ...r.result, rows: byPlanOrder([...r.result.rows, ev.row]) },
+            }));
           } else if (ev.type === "sweep") {
             setRun((r) => ({ ...r, progress: { ...r.progress, phase: "observations" }, result: { ...r.result, rows: ev.rows } }));
           } else if (ev.type === "observations") {
@@ -116,14 +173,43 @@ export default function App() {
             setRun((r) => ({ ...r, done: true, progress: { ...r.progress, phase: "done" }, result: ev.result }));
           }
         },
+        runAbort.current.signal,
       );
     });
 
-  const downloadPacket = () =>
-    step("Downloading every note and building the packet…", async () => {
-      const failed = await api.packet(run.plan, run.result);
-      if (failed) setInfo(`Packet saved. ${failed} file(s) failed to download; see download-errors.txt in the zip.`);
-    });
+  // Runs in the background: the page stays usable while files download.
+  const downloadPacket = async () => {
+    trace.clear();
+    setError("");
+    setInfo("");
+    try {
+      const job = await api.packetStart(run.plan, run.result);
+      setPacket({ runId: run.id, startedAt: Date.now(), ...job });
+    } catch (e) {
+      setError(`Packet failed to start: ${e.message}`);
+    }
+  };
+
+  const startOver = () => {
+    runAbort.current?.abort();
+    trace.clear();
+    setNote(SAMPLES.TRC);
+    setUseLlm(!!health?.llm);
+    setPlan(null);
+    setName("");
+    setDob("");
+    setPatients(null);
+    setPatientId("");
+    setApplyDates(true);
+    setTitleFallback(false);
+    setRun(null);
+    setPacket(null);
+    setBusy("");
+    setError("");
+    setInfo("");
+    setFormKey((k) => k + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const toggle = (kind, code) =>
     setPlan({ ...plan, [kind]: plan[kind].map((i) => (i.code === code ? { ...i, on: !i.on } : i)) });
@@ -134,14 +220,14 @@ export default function App() {
     setPlan({ ...plan, [kind]: [...plan[kind], { code, label: hit?.label || code, reason: "added by you", on: true }] });
   };
 
-  const isPatientId = /^\d+$/.test(name.trim());
-  const needsDob = name.trim() !== "" && !isPatientId && !dob;
-  const canSearch = !busy && name.trim() !== "" && !needsDob;
   const windowOk = !applyDates || (plan && plan.start && plan.end && plan.start < plan.end);
   const selected = plan ? plan.documents.filter((d) => d.on).length + plan.observations.filter((o) => o.on).length : 0;
+  const demos = demoPatientsFor(health?.fhirBase);
+  const demoHint = demos.find((p) => p.id === name)?.hint;
+  const runPacket = packet && run && packet.runId === run.id ? packet : null;
 
   return (
-    <div className="shell">
+    <div className={`shell ${traceOpen ? "trace-open" : "trace-closed"}`}>
       <header className="topbar">
         <div className="brand">
           <img className="brand-wordmark" src="/advantmed-wordmark.svg" alt="Advantmed" />
@@ -150,49 +236,90 @@ export default function App() {
             <p>Service note → LOINC → Cerner records</p>
           </div>
         </div>
-        {health && (
-          <div className="topbar-meta">
-            <span className="chip mono" title="FHIR base URL">FHIR: {health.fhirBase}</span>
-            <span className={`chip ${health.llm ? "ok" : "warn"}`}>
-              {health.llm
-                ? `Azure OpenAI · ${health.llmDeployment}${health.llmTemperature != null ? ` · t=${health.llmTemperature}` : ""}`
-                : "Azure OpenAI not configured"}
-            </span>
-          </div>
-        )}
+        <div className="topbar-meta">
+          {health && (
+            <>
+              <span className="chip mono" title="FHIR base URL">FHIR: {health.fhirBase}</span>
+              <span className={`chip ${health.llm ? "ok" : "warn"}`}>
+                {health.llm
+                  ? `Azure OpenAI · ${health.llmDeployment}${health.llmTemperature != null ? ` · t=${health.llmTemperature}` : ""}`
+                  : "Azure OpenAI not configured"}
+              </span>
+            </>
+          )}
+          <button className="ghost start-over" onClick={startOver} title="Clear everything, including the API trace">↺ Start over</button>
+        </div>
       </header>
 
       <main className="page">
         <div className="intro">
           <h1>Chart-chase retrieval</h1>
-          <p>Paste a chart-chase service note, pick the member, and pull every matching note from Cerner.</p>
+          <p>Enter the service note and the member, review the LOINC plan, then pull every matching note from Cerner.</p>
         </div>
 
         {error && <div className="banner error" role="alert">{error}</div>}
         {info && <div className="banner warn">{info}</div>}
         {busy && <div className="banner busy"><span className="spinner" aria-hidden="true" />{busy}</div>}
 
-        <section className="card">
-          <h2><span className="num">1</span> Service note → LOINC plan</h2>
-          <div className="row">
-            <span className="label">Sample</span>
-            {Object.keys(SAMPLES).map((k) => (
-              <button key={k} className={`ghost ${note === SAMPLES[k] ? "active" : ""}`} onClick={() => setNote(SAMPLES[k])}>
-                {k}
-              </button>
-            ))}
+        <section className="card request-card">
+          <h2>Request</h2>
+
+          <div className="field">
+            <div className="field-head">
+              <label htmlFor="note">Service note</label>
+              <div className="row tight">
+                <span className="label">Samples</span>
+                {Object.keys(SAMPLES).map((k) => (
+                  <button key={k} className={`ghost ${note === SAMPLES[k] ? "active" : ""}`} onClick={() => setNote(SAMPLES[k])}>{k}</button>
+                ))}
+              </div>
+            </div>
+            <textarea id="note" rows={4} value={note} onChange={(e) => setNote(e.target.value)} />
           </div>
-          <textarea rows={5} value={note} onChange={(e) => setNote(e.target.value)} aria-label="Service note" />
+
+          <div className="field">
+            <div className="field-head">
+              <label htmlFor="patient">Member</label>
+              {demos.length > 0 && (
+                <div className="row tight">
+                  <span className="label">Try</span>
+                  {demos.map((p) => (
+                    <button key={p.id + p.label} title={p.hint} className={`ghost ${name === p.id ? "active" : ""}`}
+                      onClick={() => { setName(p.id); setDob(""); }}>
+                      {p.label} <span className="mono muted">{p.id}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="row wrap member-row">
+              <input id="patient" className="grow" placeholder="Patient name (e.g. Tim Peters) or Patient ID" value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && canStart && start()} />
+              <DateInput key={`dob-${formKey}`} value={dob} onChange={setDob} aria-label="Date of birth"
+                className={needsDob ? "invalid" : ""} aria-invalid={needsDob} required={!isPatientId}
+                onKeyDown={(e) => e.key === "Enter" && canStart && start()}
+                title={isPatientId ? "Date of birth (optional with a Patient ID)" : "Date of birth (required with a name)"} />
+            </div>
+            <p className={`hint ${needsDob ? "warn-text" : ""}`}>
+              {needsDob ? "Date of birth (mm/dd/yyyy) is required when searching by name."
+                : demoHint || "Patient ID on its own, or name + date of birth."}
+            </p>
+          </div>
+
           <div className="row">
-            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in backend/.env" : ""}>
+            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env" : ""}>
               <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
               Use Azure OpenAI
             </label>
-            <button className="primary" onClick={translate} disabled={!!busy || !note.trim()}>Translate to LOINC</button>
+            <button className="primary" onClick={start} disabled={!canStart}>Translate &amp; find member</button>
             {!useLlm && <span className="hint">Keyword rules only</span>}
           </div>
+        </section>
 
-          {plan && (
+        <section className={`card ${plan ? "" : "dim"}`}>
+          <h2><span className="num">1</span> LOINC plan</h2>
+          {!plan ? <p className="hint">The codes and date window read from the service note appear here.</p> : (
             <div className="plan">
               <div className="row wrap">
                 <span className={`chip ${plan.source === "azure-openai" ? "ok" : ""}`}>
@@ -203,6 +330,7 @@ export default function App() {
                 <DateInput value={plan.start} onChange={(v) => setPlan({ ...plan, start: v })} aria-label="Window start" />
                 <span className="label">to before</span>
                 <DateInput value={plan.end} onChange={(v) => setPlan({ ...plan, end: v })} aria-label="Window end (exclusive)" />
+                <button className="ghost" onClick={retranslate} disabled={!!busy || !note.trim()} title="Read the service note again">Re-translate</button>
               </div>
               {plan.notes && <p className="hint">{plan.notes}</p>}
 
@@ -215,53 +343,29 @@ export default function App() {
           )}
         </section>
 
-        <section className={`card ${plan ? "" : "dim"}`}>
-          <h2><span className="num">2</span> Find the member</h2>
-          {demoPatientsFor(health?.fhirBase).length > 0 && (
-            <div className="row">
-              <span className="label">Try</span>
-              {demoPatientsFor(health?.fhirBase).map((p) => (
-                <button key={p.id + p.label} title={p.hint} disabled={!!busy}
-                  className={`ghost ${name === p.id ? "active" : ""}`}
-                  onClick={() => { setName(p.id); setDob(""); findPatients(p.id, ""); }}>
-                  {p.label} <span className="mono muted">{p.id}</span>
-                </button>
-              ))}
-            </div>
+        <section className={`card ${patients ? "" : "dim"}`}>
+          <h2><span className="num">2</span> Confirm the member</h2>
+          {!patients && <p className="hint">Matches for the member you entered appear here.</p>}
+          {patients && patients.length === 0 && (
+            <div className="banner warn">No patient matches “{name}”{dob ? ` born ${toUS(dob)}` : ""}. Check the spelling, DOB or Patient ID above and try again.</div>
           )}
-          {demoPatientsFor(health?.fhirBase).find((p) => p.id === name) && (
-            <p className="hint">{demoPatientsFor(health?.fhirBase).find((p) => p.id === name).hint}</p>
-          )}
-          <div className="row wrap">
-            <input className="grow" placeholder="Patient name or Patient ID" value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && canSearch && findPatients()} />
-            <DateInput value={dob} onChange={setDob} aria-label="Date of birth"
-              className={needsDob ? "invalid" : ""} aria-invalid={needsDob} required={!isPatientId}
-              onKeyDown={(e) => e.key === "Enter" && canSearch && findPatients()}
-              title={isPatientId ? "Date of birth (optional with a Patient ID)" : "Date of birth (required with a name)"} />
-            <button className="primary" onClick={() => findPatients()} disabled={!canSearch}>Search</button>
-          </div>
-          <p className={`hint ${needsDob ? "warn-text" : ""}`}>
-            {needsDob
-              ? "Date of birth (mm/dd/yyyy) is required when searching by name."
-              : "Search by Patient ID, or by name + date of birth."}
-          </p>
-          {patients && patients.length === 0 && <p className="hint">No patients found.</p>}
           {patients && patients.length > 0 && (
-            <div className="table-wrap">
-              <table>
-                <thead><tr><th className="narrow"></th><th>Name</th><th>DOB</th><th>Sex</th><th>Patient ID</th></tr></thead>
-                <tbody>
-                  {patients.map((p) => (
-                    <tr key={p.id} className={`clickable ${p.id === patientId ? "picked" : ""}`} onClick={() => setPatientId(p.id)}>
-                      <td><input type="radio" name="patient" checked={p.id === patientId} onChange={() => setPatientId(p.id)} /></td>
-                      <td>{p.name}</td><td className="mono">{toUS(p.birthDate)}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <p className="hint">{patients.length === 1 ? "One match, selected." : `${patients.length} matches: pick the right member.`}</p>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th className="narrow"></th><th>Name</th><th>DOB</th><th>Sex</th><th>Patient ID</th></tr></thead>
+                  <tbody>
+                    {patients.map((p) => (
+                      <tr key={p.id} className={`clickable ${p.id === patientId ? "picked" : ""}`} onClick={() => setPatientId(p.id)}>
+                        <td><input type="radio" name="patient" checked={p.id === patientId} onChange={() => setPatientId(p.id)} /></td>
+                        <td>{p.name}</td><td className="mono">{toUS(p.birthDate)}</td><td>{p.gender}</td><td className="mono">{p.id}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </section>
 
@@ -277,19 +381,20 @@ export default function App() {
               Also match notes by title (catches notes with no LOINC)
             </label>
             <button className="primary" onClick={fetchAll} disabled={!!busy || !plan || !patientId || selected === 0 || !windowOk}>
-              Fetch &amp; download ({selected} codes)
+              Fetch ({selected} codes)
             </button>
           </div>
           {plan && !windowOk && <p className="hint warn-text">Enter a valid window in step 1 (mm/dd/yyyy, start before end) or untick “Apply date window”.</p>}
           <p className="hint">Sandbox data is often older than the request window — untick “Apply date window” if nothing comes back.</p>
-
           {health?.fhirMaxRps > 0 && (
             <p className="hint">Requests to Cerner are spaced out: at most {health.fhirMaxRps}/s, {health.fhirConcurrency} codes at a time, with automatic retry when Cerner throttles.</p>
           )}
 
-          {run && <Results key={run.id} run={run} onPacket={downloadPacket} busy={!!busy} rps={health?.fhirMaxRps} />}
+          {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} rps={health?.fhirMaxRps} />}
         </section>
       </main>
+
+      <TraceDock trace={trace} open={traceOpen} onToggle={() => setTraceOpen((o) => !o)} fhirBase={health?.fhirBase} />
     </div>
   );
 }
@@ -323,7 +428,32 @@ function PlanTable({ title, kind, items, options, onToggle, onAdd }) {
   );
 }
 
-const PAGE = 50;
+const PAGE_SIZE = 10;
+
+function usePager(items, pageSize = PAGE_SIZE) {
+  const [page, setPage] = useState(1);
+  const pages = Math.max(1, Math.ceil(items.length / pageSize));
+  const current = Math.min(page, pages); // stay in range when the list shrinks (e.g. filtering)
+  const offset = (current - 1) * pageSize;
+  return { page: current, pages, setPage, offset, pageItems: items.slice(offset, offset + pageSize), total: items.length, pageSize };
+}
+
+function Pager({ pager, noun = "records" }) {
+  const { page, pages, setPage, offset, total, pageItems } = pager;
+  if (total <= pager.pageSize) return null;
+  return (
+    <div className="pager">
+      <span className="hint">{offset + 1}–{offset + pageItems.length} of {total} {noun}</span>
+      <div className="pager-nav">
+        <button className="ghost" onClick={() => setPage(1)} disabled={page === 1} aria-label="First page">«</button>
+        <button className="ghost" onClick={() => setPage(page - 1)} disabled={page === 1}>‹ Prev</button>
+        <span className="mono pager-label">Page {page} of {pages}</span>
+        <button className="ghost" onClick={() => setPage(page + 1)} disabled={page === pages}>Next ›</button>
+        <button className="ghost" onClick={() => setPage(pages)} disabled={page === pages} aria-label="Last page">»</button>
+      </div>
+    </div>
+  );
+}
 
 function Progress({ progress }) {
   const total = progress.codes.length;
@@ -362,10 +492,29 @@ function useFilter(items, text, fields) {
   return items.filter((it) => fields.some((f) => String(f(it) ?? "").toLowerCase().includes(q)));
 }
 
-function DocTab({ row }) {
+const DL_LABEL = { ready: "Ready", queued: "Queued", downloading: "Downloading", done: "Done", failed: "Failed", duplicate: "Duplicate", nofile: "No file" };
+
+// Where a note stands in the packet download.
+function downloadStatus(d, packet) {
+  if (!d.binaryUrl) return { status: "nofile" };
+  if (d.duplicate) return { status: "duplicate", error: "Already in the packet under another code" };
+  const f = packet?.files?.[d.file];
+  return f ? { status: f.status, error: f.error } : { status: "ready" };
+}
+
+function StatusChip({ status, error }) {
+  return (
+    <span className={`dl dl-${status}`} title={error || undefined}>
+      {status === "downloading" && <span className="spinner tiny" aria-hidden="true" />}
+      {DL_LABEL[status] || status}
+    </span>
+  );
+}
+
+function DocTab({ row, packet }) {
   const [filter, setFilter] = useState("");
-  const [shown, setShown] = useState(PAGE);
   const docs = useFilter(row.docs, filter, [(d) => d.title, (d) => d.author, (d) => d.date, (d) => toUS(d.date)]);
+  const pager = usePager(docs);
   return (
     <div>
       <div className="tab-head">
@@ -373,58 +522,64 @@ function DocTab({ row }) {
           <b>{row.label}</b> <span className="mono muted">LOINC {row.code}</span>
           {row.reason && <div className="hint">Why: {row.reason}</div>}
         </div>
-        {row.docs.length > 10 && (
+        {row.docs.length > PAGE_SIZE && (
           <input className="tab-filter" placeholder="Filter by title, author, date…" value={filter}
-            onChange={(e) => { setFilter(e.target.value); setShown(PAGE); }} />
+            onChange={(e) => { setFilter(e.target.value); pager.setPage(1); }} />
         )}
       </div>
+      {row.request && (
+        <div className="request" title="The FHIR search sent to Cerner for this code">
+          <span className="request-verb">GET</span>
+          <code>{row.request}</code>
+        </div>
+      )}
       {row.error && <div className="banner error small">{row.error}</div>}
       {row.truncated && <div className="banner warn">Showing the first {row.count}; Cerner has more. Narrow the date window or raise FHIR_MAX_PAGES in .env.</div>}
       {!row.error && row.count === 0 && <div className="banner warn">Nothing found for this code. It is listed in missing-items.txt.</div>}
       {docs.length > 0 && (
         <div className="table-wrap">
-          <table>
-            <thead><tr><th>Date</th><th>Title</th><th>Author</th><th>Status</th><th></th></tr></thead>
+          <table className="doc-table">
+            <colgroup>
+              <col className="col-date" /><col /><col className="col-author" /><col className="col-status" /><col className="col-file" />
+            </colgroup>
+            <thead><tr><th>Date</th><th>Title</th><th>Author</th><th>Status</th><th>File</th></tr></thead>
             <tbody>
-              {docs.slice(0, shown).map((d) => (
-                <tr key={d.id}>
-                  <td className="mono nowrap">{d.date ? toUS(d.date) : "undated"}</td>
-                  <td><b>{d.title || "(untitled)"}</b></td>
-                  <td className="muted">{d.author}</td>
-                  <td>
-                    <div className="chips">
-                      {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
-                      {d.matchedBy === "title" && <span className="chip warn">matched by title</span>}
-                      {d.duplicate && <span className="chip">also under another code</span>}
-                    </div>
-                  </td>
-                  <td className="nowrap">
-                    {d.binaryUrl ? <a href={api.binaryUrl(d)} target="_blank" rel="noreferrer">open</a> : <span className="muted small">no file</span>}
-                  </td>
-                </tr>
-              ))}
+              {pager.pageItems.map((d) => {
+                const dl = downloadStatus(d, packet);
+                return (
+                  <tr key={d.id}>
+                    <td className="mono nowrap">{d.date ? toUS(d.date) : "undated"}</td>
+                    <td>
+                      <b>{d.title || "(untitled)"}</b>
+                      {(d.matchedBy === "title" || (d.docStatus && d.docStatus !== "final")) && (
+                        <div className="chips sub">
+                          {d.docStatus && d.docStatus !== "final" && <span className="chip warn">{d.docStatus}</span>}
+                          {d.matchedBy === "title" && <span className="chip warn">matched by title</span>}
+                        </div>
+                      )}
+                    </td>
+                    <td className="muted">{d.author}</td>
+                    <td><StatusChip {...dl} /></td>
+                    <td className="nowrap">
+                      {d.binaryUrl
+                        ? <a className="open-link" href={api.binaryUrl(d)} target="_blank" rel="noreferrer" title={`Binary: ${d.binaryUrl}`}>Open</a>
+                        : <span className="muted small">—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
       {filter && docs.length === 0 && <p className="hint">No notes match “{filter}”.</p>}
-      <ShowMore total={docs.length} shown={shown} onMore={() => setShown(shown + PAGE)} />
-    </div>
-  );
-}
-
-function ShowMore({ total, shown, onMore }) {
-  if (total <= shown) return total > PAGE ? <p className="hint">Showing all {total}.</p> : null;
-  return (
-    <div className="row">
-      <span className="hint">Showing {shown} of {total}</span>
-      <button className="ghost" onClick={onMore}>Show {Math.min(PAGE, total - shown)} more</button>
+      <Pager pager={pager} noun="notes" />
     </div>
   );
 }
 
 function ResultsTab({ r }) {
-  const [shown, setShown] = useState(PAGE);
+  const pager = usePager(r.observations);
   return (
     <div>
       {r.observationError && <div className="banner error small">{r.observationError}</div>}
@@ -432,27 +587,88 @@ function ResultsTab({ r }) {
       {r.observations.length > 0 && (
         <>
           {r.observationsTruncated && <div className="banner warn">Showing the first {r.observations.length}; Cerner has more. Narrow the date window or raise FHIR_MAX_PAGES.</div>}
-          <p className="hint">Newest first. The top row is the latest: skip it if it was taken in the ED, during an inpatient stay or on a procedure day, and use the next one.</p>
+          <p className="hint">Newest first. The highlighted row is the latest: skip it if it was taken in the ED, during an inpatient stay or on a procedure day, and use the next one.</p>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Date</th><th>Result</th><th>Value</th><th>By</th></tr></thead>
               <tbody>
-                {r.observations.slice(0, shown).map((o, i) => (
-                  <tr key={o.id} className={i === 0 ? "picked" : ""}>
+                {pager.pageItems.map((o, i) => (
+                  <tr key={o.id} className={pager.offset + i === 0 ? "picked" : ""}>
                     <td className="mono nowrap">{toUS(o.date)}</td><td>{o.name}</td><td><b>{o.value}</b></td><td>{o.performer}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <ShowMore total={r.observations.length} shown={shown} onMore={() => setShown(shown + PAGE)} />
+          <Pager pager={pager} noun="results" />
         </>
       )}
     </div>
   );
 }
 
-function Results({ run, onPacket, busy, rps }) {
+function PacketFiles({ files, packet }) {
+  const pager = usePager(files);
+  return (
+    <>
+      <div className="table-wrap">
+        <table className="doc-table">
+          <colgroup><col /><col className="col-status" /></colgroup>
+          <thead><tr><th>File</th><th>Status</th></tr></thead>
+          <tbody>
+            {pager.pageItems.map((f) => {
+              const s = packet?.files?.[f];
+              // The two sheets are written into the zip at the end, not downloaded.
+              const sheetStatus = packet?.state === "ready" ? "done" : packet ? "queued" : "ready";
+              const status = s ? s.status : sheetStatus;
+              return (
+                <tr key={f}>
+                  <td className="mono">{f}</td>
+                  <td><StatusChip status={status} error={s?.error} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Pager pager={pager} noun="files" />
+    </>
+  );
+}
+
+function PacketProgress({ packet, onSaveAgain }) {
+  const c = packet.counts || {};
+  const total = Object.keys(packet.files || {}).length;
+  const finished = (c.done || 0) + (c.failed || 0);
+  const pct = total ? Math.round((finished / total) * 100) : 100;
+  const elapsed = (Date.now() - packet.startedAt) / 1000;
+  const eta = finished > 0 && packet.state === "running" ? Math.round((elapsed / finished) * (total - finished)) : null;
+  return (
+    <div className="progress">
+      <div className="progress-head">
+        <span>
+          {packet.state === "running" && `Downloading files in the background: ${finished} of ${total}`}
+          {packet.state === "ready" && `Packet ready: ${packet.zipName}`}
+          {packet.state === "failed" && <span className="bad">Packet failed: {packet.error}</span>}
+        </span>
+        <span className="mono">
+          {eta != null ? `~${eta >= 60 ? `${Math.ceil(eta / 60)} min` : `${eta}s`} left · ` : ""}{pct}%
+        </span>
+      </div>
+      <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <div className="progress-codes">
+        {["queued", "downloading", "done", "failed"].filter((k) => c[k]).map((k) => (
+          <span key={k} className={`dl dl-${k}`}>{DL_LABEL[k]} {c[k]}</span>
+        ))}
+        {packet.state === "ready" && <button className="ghost" onClick={onSaveAgain}>Save the zip again</button>}
+      </div>
+    </div>
+  );
+}
+
+function Results({ run, packet, onPacket, rps }) {
   const r = run.result;
   const [tab, setTab] = useState("overview");
   const notes = r.rows.flatMap((row) => row.docs.filter((d) => !d.duplicate && d.binaryUrl));
@@ -462,6 +678,8 @@ function Results({ run, onPacket, busy, rps }) {
   const docRows = r.rows.filter((row) => row.code !== "clinical-note");
   const sweepError = r.rows.find((row) => row.code === "clinical-note");
   const current = docRows.find((row) => row.code === tab);
+  const packetRunning = packet?.state === "running";
+  const packetLabel = packetRunning ? "Downloading…" : packet?.state === "ready" ? "Download packet again" : "Download packet (.zip)";
 
   const tabs = [
     { id: "overview", label: "Overview" },
@@ -483,10 +701,11 @@ function Results({ run, onPacket, busy, rps }) {
             <span className="stat mono">{r.window.start ? `${toUS(r.window.start)} → before ${toUS(r.window.end)}` : "no date filter"}</span>
           </div>
         </div>
-        <button className="primary" onClick={onPacket} disabled={busy || !run.done}>Download packet (.zip)</button>
+        <button className="primary" onClick={onPacket} disabled={!run.done || packetRunning}>{packetLabel}</button>
       </div>
 
       {!run.done && <Progress progress={run.progress} />}
+      {packet && <PacketProgress packet={packet} onSaveAgain={() => api.packetSave(packet.job)} />}
 
       <div className="tabs" role="tablist">
         {tabs.map((t) => (
@@ -517,7 +736,7 @@ function Results({ run, onPacket, busy, rps }) {
                           {!row ? <span className="muted">waiting…</span>
                             : row.error ? <span className="bad" title={row.error}>error</span>
                             : row.count ? (row.truncated ? <span title="More exist: raise FHIR_MAX_PAGES or narrow the date window">{row.count}+</span> : row.count)
-            : <span className="bad">missing</span>}
+                            : <span className="bad">missing</span>}
                         </td>
                         <td className="mono">{latest ? toUS(latest) : ""}</td>
                       </tr>
@@ -538,7 +757,7 @@ function Results({ run, onPacket, busy, rps }) {
           </>
         )}
 
-        {current && <DocTab key={current.code} row={current} />}
+        {current && <DocTab key={current.code} row={current} packet={packet} />}
 
         {tab === "results" && <ResultsTab r={r} />}
 
@@ -547,14 +766,12 @@ function Results({ run, onPacket, busy, rps }) {
             {!run.done ? <p className="hint">The packet is ready once every code has been fetched.</p> : (
               <>
                 <div className="row">
-                  <button className="primary" onClick={onPacket} disabled={busy}>Download packet (.zip)</button>
+                  <button className="primary" onClick={onPacket} disabled={packetRunning}>{packetLabel}</button>
                   <span className="hint">
-                    {files.length} files{minutes > 1 ? ` · about ${minutes} min to download at ${rps} requests/s` : ""}
+                    {files.length} files{!packet && minutes > 1 ? ` · roughly ${minutes}–${minutes * 2} min on the sandbox; it runs in the background` : ""}
                   </span>
                 </div>
-                <ul className="files">
-                  {files.map((f) => <li key={f} className="mono">{f}</li>)}
-                </ul>
+                <PacketFiles files={files} packet={packet} />
               </>
             )}
           </div>

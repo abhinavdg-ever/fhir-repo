@@ -188,3 +188,75 @@ def test_search_flags_truncation_without_fetching_extra_page(monkeypatch):
     docs = asyncio.run(go())
     assert len(docs) == 3 and docs.truncated
     assert len(calls) == 3  # no wasted 4th page
+
+
+def test_fhir_calls_are_logged_with_retries(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from worker import fhir_client
+
+    state = {"n": 0}
+
+    def handler(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"resourceType": "Patient", "id": "7"})
+
+    monkeypatch.setenv("FHIR_MAX_RPS", "0")
+    before = client.get("/api/calls").json()["last"]
+    async def go():
+        c = fhir_client.FhirClient("https://fhir.example.cerner.com/r4/t")
+        c.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            await c.get_patient("7")
+        finally:
+            await c.close()
+
+    asyncio.run(go())
+    logged = client.get("/api/calls", params={"after": before}).json()["calls"]
+    assert [(c["status"], c["attempt"]) for c in logged] == [(429, 1), (200, 2)]
+    assert logged[-1]["url"].endswith("/Patient/7")
+
+
+def test_packet_job_reports_per_file_status_and_serves_zip(monkeypatch):
+    import io
+    import time
+    import zipfile
+
+    from worker import fhir_client
+
+    async def fake_download(self, url, content_type):
+        if url.endswith("XR-2"):
+            raise fhir_client.FhirError(404, url, "gone")
+        return b"%PDF-1.4 fake", "application/pdf"
+
+    monkeypatch.setattr(fhir_client.FhirClient, "download_binary", fake_download)
+    base = app_module.FHIR_BASE
+    result = {
+        "patient": {"id": "1", "name": "Doe, Jane", "birthDate": "1958-04-02"},
+        "window": {"start": None, "end": None},
+        "rows": [{"code": "11506-3", "label": "Progress note", "count": 2, "error": None, "docs": [
+            {"id": "1", "file": "2026-01-01_Note_1.pdf", "binaryUrl": f"{base}/Binary/XR-1", "contentType": "application/pdf"},
+            {"id": "2", "file": "2026-01-02_Note_2.pdf", "binaryUrl": f"{base}/Binary/XR-2", "contentType": "application/pdf"},
+        ]}],
+        "observations": [],
+    }
+    plan = {"start": "2026-01-01", "end": "2026-11-12", "documents": [{"code": "11506-3", "label": "Progress note"}]}
+    with TestClient(app_module.app) as tc:  # keeps one event loop alive for the background task
+        job = tc.post("/api/packet/jobs", json={"plan": plan, "result": result}).json()
+        assert set(job["files"]) == {"2026-01-01_Note_1.pdf", "2026-01-02_Note_2.pdf"}
+        for _ in range(50):
+            status = tc.get(f"/api/packet/jobs/{job['job']}").json()
+            if status["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert status["state"] == "ready"
+        assert status["files"]["2026-01-01_Note_1.pdf"]["status"] == "done"
+        assert status["files"]["2026-01-02_Note_2.pdf"]["status"] == "failed"
+        z = tc.get(f"/api/packet/jobs/{job['job']}/zip")
+        assert z.headers["X-Download-Errors"] == "1"
+        names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+        assert "2026-01-01_Note_1.pdf" in names and "download-errors.txt" in names

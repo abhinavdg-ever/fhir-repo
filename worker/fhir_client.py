@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import os
 import random
 import time
+from collections import deque
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
@@ -57,6 +60,28 @@ class RateLimiter:
 LIMITER = RateLimiter()
 
 
+class CallLog:
+    """The most recent FHIR requests (every attempt, retries included), for the UI's API calls window.
+
+    Process-wide and in memory: fine for a demo, shared by everyone using this server.
+    """
+
+    def __init__(self, size: int = 2000):
+        self._calls: deque[dict] = deque(maxlen=size)
+        self._ids = itertools.count(1)
+
+    def add(self, **entry) -> None:
+        entry["id"] = next(self._ids)
+        entry["at"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        self._calls.append(entry)
+
+    def since(self, after: int = 0) -> list[dict]:
+        return [c for c in self._calls if c["id"] > after]
+
+
+CALL_LOG = CallLog()
+
+
 def retry_after_seconds(response: httpx.Response, attempt: int) -> float:
     """Server's Retry-After (seconds or HTTP date) if given, else 1, 2, 4, 8… plus jitter."""
     header = response.headers.get("Retry-After", "").strip()
@@ -77,9 +102,10 @@ def retry_after_seconds(response: httpx.Response, attempt: int) -> float:
 class SearchResults(list):
     """A list of resources that remembers whether paging stopped early."""
 
-    def __init__(self, items=(), truncated: bool = False):
+    def __init__(self, items=(), truncated: bool = False, request_url: str = ""):
         super().__init__(items)
         self.truncated = truncated
+        self.request_url = request_url  # the first-page search URL, as sent
 
 
 class FhirClient:
@@ -100,17 +126,27 @@ class FhirClient:
     async def _get(self, url: str, **kwargs) -> httpx.Response:
         rps = _env_float("FHIR_MAX_RPS", 3)
         retries = int(_env_float("FHIR_MAX_RETRIES", 4))
+        full_url = str(httpx.URL(url, params=kwargs.get("params")))
+        accept = (kwargs.get("headers") or {}).get("Accept", FHIR_JSON)
         for attempt in range(retries + 1):
             await LIMITER.wait(rps)
+            started = time.monotonic()
             try:
                 r = await self.http.get(url, **kwargs)
             except httpx.TransportError as e:  # timeouts, connection resets: worth another try
+                CALL_LOG.add(method="GET", url=full_url, accept=accept, status=None, attempt=attempt + 1,
+                             ms=round((time.monotonic() - started) * 1000), error=type(e).__name__)
                 if attempt == retries:
                     raise FhirError(0, url, f"{type(e).__name__} after {retries + 1} tries") from e
                 await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
                 continue
             except httpx.HTTPError as e:
+                CALL_LOG.add(method="GET", url=full_url, accept=accept, status=None, attempt=attempt + 1,
+                             ms=round((time.monotonic() - started) * 1000), error=type(e).__name__)
                 raise FhirError(0, url, f"{type(e).__name__}: {e}") from e
+            CALL_LOG.add(method="GET", url=str(r.request.url), accept=accept, status=r.status_code,
+                         attempt=attempt + 1, ms=round((time.monotonic() - started) * 1000),
+                         error=None if r.status_code < 400 else r.reason_phrase)
             if r.status_code not in RETRY_STATUSES or attempt == retries:
                 return r
             await asyncio.sleep(retry_after_seconds(r, attempt))
@@ -139,7 +175,9 @@ class FhirClient:
                 break
             bundle = await self.get_json(nxt)
         # Cerner can put OperationOutcome entries in a searchset; keep only real hits
-        return SearchResults((r for r in out if r.get("resourceType") == resource), truncated=truncated)
+        request_url = str(httpx.URL(self.url(resource), params=params))
+        return SearchResults((r for r in out if r.get("resourceType") == resource),
+                             truncated=truncated, request_url=request_url)
 
     # ---- Patient ----
     async def find_patients(self, name: str, birthdate: str | None = None) -> list[dict]:

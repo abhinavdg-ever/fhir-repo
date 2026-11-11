@@ -2,6 +2,8 @@
 
 Paste a payer chart-chase **service note** and a **member**. The app:
 
+Enter the service note and the member (name + date of birth, or Patient ID) together at the top, then:
+
 1. **Plans** — Azure OpenAI (gpt-4o-mini, JSON mode) turns the note into document LOINC codes, result LOINC codes and a date window. Every code is checked against the allow-list in `agent/doc_types.py`; anything else is dropped. Untick "Use Azure OpenAI" to use keyword rules instead (no silent fallback).
 2. **Finds the patient** in Cerner (`Patient?name=` or a Patient ID).
 3. **Requests each LOINC code** — one `DocumentReference?patient=…&type=http://loinc.org|{code}&period=ge…&period=lt…` per code, plus one `Observation` search for BP / HbA1c / GMI.
@@ -76,11 +78,16 @@ Restart uvicorn after editing `.env`. The header chip shows the active deploymen
 | --- | --- | --- |
 | `FHIR_MAX_RPS` | `3` | requests per second to Cerner, shared by every search, page and download (`0` = no limit) |
 | `FHIR_CONCURRENCY` | `2` | LOINC searches in flight at once |
+| `FHIR_DOWNLOAD_CONCURRENCY` | `10` | Binary downloads in flight (each sandbox Binary call takes ~4 s whatever its size) |
 | `FHIR_MAX_RETRIES` | `4` | retries on 429 / 502 / 503 / 504 and timeouts (honours `Retry-After`, else 1s, 2s, 4s, 8s) |
 | `FHIR_TIMEOUT` | `60` | seconds per request |
 | `FHIR_MAX_PAGES` | `10` | pages per search (100 notes each); a code that hits it shows as `1000+` |
 
-Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) and are organised into tabs: Overview, one tab per document type, Results (observations) and Packet.
+Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) and are organised into tabs: Overview, one tab per document type (10 per page, with the exact DocumentReference request shown), Results (observations) and Packet.
+
+The packet is a background job: each note's file is a separate `GET Binary/{id}` call (the DocumentReference's `content[].attachment.url`), so a large record takes a few minutes. The page stays usable meanwhile and each note's Status shows Queued → Downloading → Done / Failed. The zip is held in memory until saved.
+
+The **API trace** panel at the bottom lists every call for the current request — the browser's calls to this app and the backend's calls to Cerner (status, time, retries). It clears with each new request; **Start over** at the top resets everything.
 
 **Offline:** `uvicorn dev.mock_fhir:app --port 9000` and set `FHIR_BASE=http://localhost:9000/r4/mock` (search `jane` or `12724066`).
 
@@ -95,6 +102,10 @@ Results stream into the UI as each LOINC call finishes (`POST /api/run/stream`) 
 | POST | `/api/run` | `{patient_id, plan, apply_dates, title_fallback}` | rows per LOINC call, observations, missing codes |
 | POST | `/api/run/stream` | same as `/api/run` | NDJSON events: `start`, `row` (one per LOINC call), `sweep`, `observations`, `done` |
 | GET | `/api/binary` | `url, type, name` | the file, inline (Cerner Binary URLs only; others → 400) |
+| POST | `/api/packet/jobs` | `{plan, result}` | starts a background packet download → `{job, files, state}` |
+| GET | `/api/packet/jobs/{job}` | — | per-file status (`queued` / `downloading` / `done` / `failed`) |
+| GET | `/api/packet/jobs/{job}/zip` | — | the finished zip |
+| GET | `/api/calls` | `after` | FHIR calls sent to Cerner (for the API trace) |
 | POST | `/api/packet` | `{plan, result}` | zip attachment, header `X-Download-Errors` |
 
 ## Before real patient data
