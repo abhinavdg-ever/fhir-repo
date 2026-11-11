@@ -134,6 +134,10 @@ def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
             raise ValueError("end before start")
     except (TypeError, ValueError):
         start, end = fallback_start, fallback_end
+    # Records can't come from the future: cap the window at tomorrow, as the rules window does.
+    tomorrow = ((today or date.today()) + timedelta(days=1)).isoformat()
+    if end > tomorrow:
+        end = tomorrow if tomorrow > start else fallback_end
 
     def items(key, allowed, label):
         out, seen = [], set()
@@ -146,7 +150,8 @@ def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
         return out
 
     measures = []
-    for m in raw.get("measures") or []:
+    # Measures named in the note (e.g. "TRC") count even if the model leaves them out.
+    for m in [*(raw.get("measures") or []), *find_measures(note)]:
         if m in MEASURES and m not in measures:
             measures.append(m)
 

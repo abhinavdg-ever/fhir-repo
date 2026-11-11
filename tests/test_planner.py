@@ -43,3 +43,10 @@ def test_rules_cbp_adds_progress_note():
     assert {o.code for o in plan.observations} == {"85354-9", "8480-6", "8462-4"}
     assert "11506-3" in {d.code for d in plan.documents}
     assert plan.measures == ["CBP"]
+
+
+def test_validate_caps_end_at_tomorrow_and_reads_measures_from_note():
+    plan = validate_llm_json({"start": "2026-01-01", "end_exclusive": "2027-01-01", "measures": []},
+                             "TRC - 2026 discharge summaries", TODAY)
+    assert (plan.start, plan.end) == ("2026-01-01", "2026-11-12")
+    assert plan.measures == ["TRC"]
