@@ -605,5 +605,6 @@ td.r, th.r { text-align: right; white-space: nowrap; }
 .error-text { color: var(--bad-fg); }
 @media (max-width: 640px) { .model-select { max-width: 100%; width: 100%; } }
 .plan-extras { align-items: flex-start; }
-.plan-extras .intent-json { flex: 1 1 100%; }
 .token-usage { margin-top: 0.5rem; display: grid; gap: 0.4rem; }
+.plan-extras { margin-top: 0.6rem; gap: 0.5rem; }
+.token-usage > .usage-panel { margin-bottom: 0; }

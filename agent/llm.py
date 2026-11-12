@@ -49,6 +49,11 @@ CATALOG: list[Model] = [
 ]
 
 
+# The costliest text model on Azure AI Foundry (Global Standard, Azure Retail Prices API, Nov 2026):
+# every cost is also shown against it ("x% lower than o1-pro"), and the UI's cost stars use it as 5 stars.
+COSTLIEST = Model("o1-pro", "o1-pro", "openai", 150.00, 600.00)
+
+
 def _env(name: str, default: str = "") -> str:
     value = os.getenv(name, default).split(" #")[0].strip()
     return "" if "<" in value else value
@@ -199,6 +204,7 @@ def chat_json(model: Model, messages: list[dict], temperature: float | None, tim
         "costUsd": cost(model, input_tokens, output_tokens, cached),
         "latencyMs": round((time.perf_counter() - started) * 1000),
         "pricePer1M": {"input": model.input, "cached": model.cached, "output": model.output},
+        "costliest": {"model": COSTLIEST.deployment, "costUsd": cost(COSTLIEST, input_tokens, output_tokens)},
         "priceSource": model.price_source,
     }
     record(usage)

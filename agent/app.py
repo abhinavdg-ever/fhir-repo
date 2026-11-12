@@ -47,7 +47,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from agent.doc_types import DOCUMENT_CODES, OBSERVATION_CODES  # noqa: E402
 from agent.redact import enabled as redact_enabled  # noqa: E402
-from agent.llm import get_model, models as llm_models, reset_usage, usage_summary  # noqa: E402
+from agent.llm import COSTLIEST, get_model, models as llm_models, reset_usage, usage_summary  # noqa: E402
 from agent.planner import LlmError, build_messages, llm_configured, llm_settings, make_plan  # noqa: E402
 from common.models import PacketRequest, Plan, PlanRequest, RunRequest  # noqa: E402
 from worker.fhir_client import (CALL_LOG, FhirClient, FhirError, doc_summary,  # noqa: E402
@@ -117,7 +117,10 @@ def prompt(req: PlanRequest):
 def list_models():
     """The deployments the UI can pick from, with their price per 1M tokens (USD)."""
     default = llm_settings()["deployment"]
-    return {"default": default, "models": [
+    return {"default": default,
+            "costliest": {"deployment": COSTLIEST.deployment, "input": COSTLIEST.input, "output": COSTLIEST.output,
+                          "priceSource": "Azure Retail Prices API (costliest Foundry text model)"},
+            "models": [
         {"deployment": m.deployment, "label": m.label, "api": m.api, "input": m.input, "cached": m.cached,
          "output": m.output, "priceSource": m.price_source, "default": m.deployment == default}
         for m in llm_models()]}

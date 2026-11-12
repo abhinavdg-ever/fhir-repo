@@ -265,4 +265,4 @@ The Request card has a model picker (from `AOAI_MODELS`). Every plan shows the t
 | mistral-small-2503 | OpenAI v1 | $0.10 | $0.30 | Mistral list price (Marketplace) |
 | claude-haiku-4-5 | Anthropic Messages | $1.00 | $5.00 | Anthropic list price (Marketplace) |
 
-Cost = input × input price + output × output price (cached input at its own price). The usage ledger is in memory and resets when the server restarts. Check your Azure invoice for the billed amounts.
+Cost = input × input price + output × output price (cached input at its own price). Each cost is also shown against **o1-pro** ($150 in / $600 out per 1M, the costliest text model on Azure AI Foundry) on the same tokens, e.g. *98.3% lower than o1-pro*. The ★ cost rating is a log scale from $0.10 per 1M (in + out) to o1-pro = ★★★★★: GPT-4o ★★★, Claude Haiku 4.5 and GPT-4.1 mini ★★, Llama 4 Maverick and Mistral Small ★. The usage ledger is in memory and resets when the server restarts. Check your Azure invoice for the billed amounts.

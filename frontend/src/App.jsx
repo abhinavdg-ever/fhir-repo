@@ -67,7 +67,7 @@ export default function App() {
   const [models, setModels] = useState([]); // deployments to pick from, with prices
   const [model, setModel] = useState("");
   const [usage, setUsage] = useState(null); // tokens and cost of the model calls so far
-  const [usageOpen, setUsageOpen] = useState(false);
+  const [planExtra, setPlanExtra] = useState(null); // "json" | "cost": the panel under the plan
   const [plan, setPlan] = useState(null);
   const [name, setName] = useState("");
   const [dob, setDob] = useState("");
@@ -100,7 +100,7 @@ export default function App() {
       })
       .catch((e) => setError(`Backend not reachable: ${e.message}`));
     api.catalog().then(setCatalog).catch(() => {});
-    api.models().then((m) => { setModels(byCost(m.models)); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
+    api.models().then((m) => { COSTLIEST = m.costliest || COSTLIEST; setModels(byCost(m.models)); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
     api.usage().then(setUsage).catch(() => {});
   }, []);
 
@@ -383,10 +383,10 @@ export default function App() {
             </label>
             {models.length > 0 && (
               <select className="model-select" value={model} onChange={(e) => { setModel(e.target.value); setPrompt(null); }}
-                disabled={!useLlm} aria-label="Model" title="Model that reads the service note; ★ = cost, most stars = costliest">
+                disabled={!useLlm} aria-label="Model" title="Model that reads the service note. ★ = cost on a log scale; ★★★★★ = o1-pro, the costliest model on Azure AI Foundry">
                 {models.map((m) => (
                   <option key={m.deployment} value={m.deployment}>
-                    {shortName(m)}  {stars(m, models)}
+                    {shortName(m)}  {stars(m)}
                   </option>
                 ))}
               </select>
@@ -475,7 +475,7 @@ export default function App() {
         </section>
 
         <section className={`card ${plan ? "" : "dim"}`}>
-          <h2><span className="r">1</span> LOINC plan</h2>
+          <h2><span className="num">1</span> LOINC plan</h2>
           {!plan ? <p className="hint">The codes and date window read from the service note appear here.</p> : (
             <div className="plan">
               <div className="row wrap">
@@ -522,24 +522,33 @@ export default function App() {
               )}
               <p className="hint">Also requested: <b>Patient</b> (biographical sheet).</p>
               <div className="row wrap plan-extras">
-                {plan.intent && <IntentJson intent={plan.intent} />}
-                {plan.usage && <TokenUsage usage={plan.usage} />}
-                {models.length > 0 && (
-                  <button className="ghost small-btn" aria-expanded={usageOpen} onClick={() => {
-                    setUsageOpen((o) => !o); api.usage().then(setUsage).catch(() => {});
-                  }}>
-                    {usageOpen ? "Hide usage & cost" : `Usage & cost${usage ? ` · ${fmtUsd(usage.totalCostUsd)}` : ""}`}
+                {plan.intent && (
+                  <button className="ghost small-btn" aria-expanded={planExtra === "json"}
+                    onClick={() => setPlanExtra((v) => (v === "json" ? null : "json"))}>
+                    {planExtra === "json" ? "Hide agent output (JSON)" : "Agent output (JSON)"}
+                  </button>
+                )}
+                {plan.usage && (
+                  <button className="ghost small-btn" aria-expanded={planExtra === "cost"}
+                    onClick={() => { setPlanExtra((v) => (v === "cost" ? null : "cost")); api.usage().then(setUsage).catch(() => {}); }}>
+                    {planExtra === "cost" ? "Hide Token & Cost" : `Token & Cost · ${fmtUsd(plan.usage.costUsd)}`}
                   </button>
                 )}
               </div>
-              {usageOpen && <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
-                onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />}
+              {planExtra === "json" && plan.intent && <pre className="json">{JSON.stringify(plan.intent, null, 2)}</pre>}
+              {planExtra === "cost" && plan.usage && (
+                <div className="token-usage">
+                  <TokenUsage usage={plan.usage} />
+                  <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
+                    onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />
+                </div>
+              )}
             </div>
           )}
         </section>
 
         <section className={`card ${patients ? "" : "dim"}`}>
-          <h2><span className="r">2</span> Member Confirmation</h2>
+          <h2><span className="num">2</span> Member Confirmation</h2>
           {!patients && <p className="hint">Matches for the member you entered appear here.</p>}
           {patients && patients.length === 0 && (
             <div className="banner warn">No patient matches “{name}”{dob ? ` born ${toUS(dob)}` : ""}. Check the spelling, DOB or Patient ID above and try again.</div>
@@ -553,7 +562,7 @@ export default function App() {
         </section>
 
         <section className={`card ${plan && patientId ? "" : "dim"}`}>
-          <h2><span className="r">3</span> Download Package</h2>
+          <h2><span className="num">3</span> Download Package</h2>
           <div className="row wrap">
             <label className="check">
               <input type="checkbox" checked={applyDates} onChange={(e) => setApplyDates(e.target.checked)} />
@@ -598,11 +607,19 @@ const priceOf = (m) => (m.input || 0) + (m.output || 0);
 const byCost = (list) => [...list].sort((a, b) => priceOf(b) - priceOf(a));
 // The name without its version in brackets, e.g. "GPT-4o (2024-11-20)" -> "GPT-4o".
 const shortName = (m) => (m.label || m.deployment).replace(/\s*\([^)]*\)\s*$/, "");
-// Cost in stars: the costliest model gets one star per model, the cheapest one star.
-const stars = (m, list) => {
-  const prices = [...new Set(list.map(priceOf))].sort((a, b) => a - b);
-  return "★".repeat(prices.indexOf(priceOf(m)) + 1);
+// The costliest text model on Azure AI Foundry (from /api/models): o1-pro, $150 in / $600 out per 1M.
+let COSTLIEST = { deployment: "o1-pro", input: 150, output: 600 };
+// Cost in stars on a log scale from $0.10 per 1M (in + out) to o1-pro (5 stars), at least 1 star.
+// GPT-4o ($12.50) = 3 stars, Claude Haiku ($6) and GPT-4.1 mini ($2) = 2, Llama ($1.25) and Mistral ($0.40) = 1.
+const starCount = (m) => {
+  const lo = 0.1, hi = priceOf(COSTLIEST);
+  const x = Math.log(Math.max(priceOf(m), lo) / lo) / Math.log(hi / lo);
+  return Math.min(5, Math.max(1, Math.round(5 * x)));
 };
+const stars = (m) => "★".repeat(starCount(m)) + "☆".repeat(5 - starCount(m));
+// How much cheaper than o1-pro on the same tokens, e.g. "98% lower than o1-pro".
+const lowerThanCostliest = (cost, costliestCost) =>
+  costliestCost > 0 ? `${(100 * (1 - cost / costliestCost)).toFixed(1)}% lower than ${COSTLIEST.deployment}` : "";
 const fmtUsd = (n) => `$${(n ?? 0) < 0.01 ? (n ?? 0).toFixed(5) : (n ?? 0).toFixed(4)}`;
 
 function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
@@ -634,17 +651,18 @@ function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
       {compare && (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Model</th><th className="r">Input</th><th className="r">Output</th><th className="r">Cost</th><th className="r">Time</th><th>Measures</th><th>Job window</th><th className="r">Doc codes</th><th>Encounters</th></tr></thead>
+            <thead><tr><th>Model</th><th className="r">Input</th><th className="r">Output</th><th className="r">Cost</th><th className="r">vs o1-pro</th><th className="r">Time</th><th>Measures</th><th>Job window</th><th className="r">Doc codes</th><th>Encounters</th></tr></thead>
             <tbody>
               {compare.map((r) => (
                 <tr key={r.model}>
                   <td>{r.label}</td>
-                  {r.pending ? <td colSpan={8} className="hint">Waiting for the model…</td>
-                    : r.error ? <td colSpan={8} className="error-text">{r.error}</td>
+                  {r.pending ? <td colSpan={9} className="hint">Waiting for the model…</td>
+                    : r.error ? <td colSpan={9} className="error-text">{r.error}</td>
                     : <>
                       <td className="r mono">{fmtInt(r.plan.usage?.inputTokens)}</td>
                       <td className="r mono">{fmtInt(r.plan.usage?.outputTokens)}</td>
                       <td className="r mono">{fmtUsd(r.plan.usage?.costUsd)}</td>
+                      <td className="r mono">{r.plan.usage?.costliest ? `${(100 * (1 - r.plan.usage.costUsd / r.plan.usage.costliest.costUsd)).toFixed(1)}% lower` : "–"}</td>
                       <td className="r mono">{((r.plan.usage?.latencyMs || 0) / 1000).toFixed(1)} s</td>
                       <td>{r.plan.measures.join(", ") || "generic"}</td>
                       <td className="mono">{toUS(r.plan.start)} – {toUS(r.plan.end)}</td>
@@ -659,18 +677,19 @@ function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
       )}
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Model</th><th className="r">Calls</th><th className="r">Input tokens</th><th className="r">Output tokens</th><th className="r">Cost</th><th className="r">Price / 1M (in · out)</th></tr></thead>
+          <thead><tr><th>Model</th><th className="r">Calls</th><th className="r">Input tokens</th><th className="r">Output tokens</th><th className="r">Cost</th><th className="r">Price / 1M (in · out)</th><th>Cost rating</th></tr></thead>
           <tbody>
             {models.map((m) => {
               const t = byModel.find((b) => b.model === m.deployment);
               return (
                 <tr key={m.deployment}>
-                  <td title={m.priceSource}>{shortName(m)} <span className="stars">{stars(m, models)}</span></td>
+                  <td title={m.priceSource}>{shortName(m)}</td>
                   <td className="r">{t?.calls || 0}</td>
                   <td className="r mono">{fmtInt(t?.inputTokens)}</td>
                   <td className="r mono">{fmtInt(t?.outputTokens)}</td>
                   <td className="r mono">{fmtUsd(t?.costUsd)}</td>
                   <td className="r mono" title={m.priceSource}>${fmtPrice(m.input)} · ${fmtPrice(m.output)}</td>
+                  <td><span className="stars" title="Cost on a log scale: 5 stars = o1-pro, the costliest model on Azure AI Foundry">{stars(m)}</span></td>
                 </tr>
               );
             })}
@@ -681,6 +700,13 @@ function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
               <td className="r mono">{fmtInt(byModel.reduce((a, b) => a + b.outputTokens, 0))}</td>
               <td className="r mono"><b>{fmtUsd(usage?.totalCostUsd)}</b></td>
               <td />
+              <td />
+            </tr>
+            <tr className="muted">
+              <td>{COSTLIEST.deployment} (costliest on Foundry, reference)</td>
+              <td /><td /><td /><td />
+              <td className="r mono">${fmtPrice(COSTLIEST.input)} · ${fmtPrice(COSTLIEST.output)}</td>
+              <td><span className="stars">★★★★★</span></td>
             </tr>
           </tbody>
         </table>
@@ -772,21 +798,7 @@ function PlanTable({ title, kind, items, options, onToggle, onAdd, codeLabel = "
   );
 }
 
-// The agent's output exactly as validated (the agreed clinical-intent schema).
-function IntentJson({ intent }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="intent-json">
-      <button className="ghost small-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {open ? "Hide agent output (JSON)" : "Agent output (JSON)"}
-      </button>
-      {open && <pre className="json">{JSON.stringify(intent, null, 2)}</pre>}
-    </div>
-  );
-}
-
 function TokenUsage({ usage }) {
-  const [open, setOpen] = useState(false);
   const p = usage.pricePer1M || {};
   const cachedRate = p.cached ?? p.input;
   const fresh = Math.max((usage.inputTokens || 0) - (usage.cachedTokens || 0), 0);
@@ -796,12 +808,7 @@ function TokenUsage({ usage }) {
     ["Output tokens", usage.outputTokens || 0, p.output],
   ];
   return (
-    <div className="intent-json">
-      <button className="ghost small-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {open ? "Hide Token & Cost" : `Token & Cost · ${fmtUsd(usage.costUsd)}`}
-      </button>
-      {open && (
-        <div className="token-usage">
+    <>
           <div className="table-wrap">
             <table>
               <thead><tr><th>{usage.label || usage.model}</th><th className="r">Tokens</th><th className="r">Price / 1M</th><th className="r">Approx. cost</th></tr></thead>
@@ -819,10 +826,9 @@ function TokenUsage({ usage }) {
             Deployment <span className="mono">{usage.model}</span> · {(usage.latencyMs / 1000).toFixed(1)} s · prices: {usage.priceSource}.
             Approximate: USD pay-as-you-go list prices; your Azure invoice is the billed amount.
             About {fmtUsd(usage.costUsd * 1000)} per 1,000 notes like this one.
+            {usage.costliest && <> The same tokens on {usage.costliest.model}: {fmtUsd(usage.costliest.costUsd)}, so this is <b>{lowerThanCostliest(usage.costUsd, usage.costliest.costUsd)}</b>.</>}
           </p>
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
