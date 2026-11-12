@@ -100,12 +100,12 @@ export default function App() {
       })
       .catch((e) => setError(`Backend not reachable: ${e.message}`));
     api.catalog().then(setCatalog).catch(() => {});
-    api.models().then((m) => { setModels(m.models); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
+    api.models().then((m) => { setModels(byCost(m.models)); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
     api.usage().then(setUsage).catch(() => {});
   }, []);
 
   const modelInfo = models.find((m) => m.deployment === model);
-  const modelName = modelInfo?.label || model || "Azure OpenAI";
+  const modelName = modelInfo ? shortName(modelInfo) : model || "Azure OpenAI";
   const askPlan = async () => {
     try { return await api.plan(note, useLlm, useLlm ? model : undefined); }
     finally { if (useLlm) api.usage().then(setUsage).catch(() => {}); }
@@ -154,9 +154,13 @@ export default function App() {
   const patientReady = name.trim() !== "" && !needsDob;
   const canStart = !busy && note.trim() !== "" && patientReady;
 
+  // Collapse the suggested members and the prompt once a request goes out.
+  const collapseRequestExtras = () => { setShowSuggest(false); setPrompt(null); setPromptError(""); };
+
   // Translate the note and look up the member at the same time.
-  const start = () =>
-    step(useLlm ? `Asking ${modelName} to read the service note and looking up the member…` : "Mapping the note and looking up the member…", async () => {
+  const start = () => {
+    collapseRequestExtras();
+    return step(useLlm ? `Asking ${modelName} to read the service note and looking up the member…` : "Mapping the note and looking up the member…", async () => {
       setRun(null);
       setPlan(null);
       setPatients(null);
@@ -176,6 +180,7 @@ export default function App() {
       }
       if (problems.length) throw new Error(problems.join(" · "));
     });
+  };
 
   // Take the agent's plan: every code on, and the fetch options its fallback_strategy asks for.
   const adoptPlan = (p) => {
@@ -187,11 +192,13 @@ export default function App() {
     setIncludeOther(!!p.all_records);
   };
 
-  const retranslate = () =>
-    step(useLlm ? `Asking ${modelName} to read the service note…` : "Applying keyword rules…", async () => {
+  const retranslate = () => {
+    collapseRequestExtras();
+    return step(useLlm ? `Asking ${modelName} to read the service note…` : "Applying keyword rules…", async () => {
       adoptPlan(await askPlan());
       setRun(null);
     });
+  };
 
   const fetchAll = () =>
     step("Requesting each LOINC code from Cerner…", async () => {
@@ -347,7 +354,7 @@ export default function App() {
               <span className="chip mono" title="FHIR base URL">FHIR: {health.fhirBase}</span>
               <span className={`chip ${health.llm ? "ok" : "warn"}`}>
                 {health.llm
-                  ? `Azure AI Foundry · ${useLlm ? model || health.llmDeployment : "keyword rules"}${health.llmTemperature != null ? ` · t=${health.llmTemperature}` : ""}`
+                  ? `Azure AI Foundry · ${useLlm ? (modelInfo ? modelName : health.llmDeployment) : "keyword rules"}`
                   : "Azure OpenAI not configured"}
               </span>
             </>
@@ -376,23 +383,16 @@ export default function App() {
             </label>
             {models.length > 0 && (
               <select className="model-select" value={model} onChange={(e) => { setModel(e.target.value); setPrompt(null); }}
-                disabled={!useLlm} aria-label="Model" title="Azure AI Foundry deployment that reads the service note">
+                disabled={!useLlm} aria-label="Model" title="Model that reads the service note; ★ = cost, most stars = costliest">
                 {models.map((m) => (
                   <option key={m.deployment} value={m.deployment}>
-                    {m.label} · ${fmtPrice(m.input)} in / ${fmtPrice(m.output)} out per 1M
+                    {shortName(m)}  {stars(m, models)}
                   </option>
                 ))}
               </select>
             )}
-            <button className="ghost small-btn" aria-expanded={usageOpen} onClick={() => {
-              setUsageOpen((o) => !o); api.usage().then(setUsage).catch(() => {});
-            }}>
-              Usage &amp; cost{usage ? ` · ${fmtUsd(usage.totalCostUsd)}` : ""}
-            </button>
             </div>
           </div>
-          {usageOpen && <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
-            onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />}
 
           <div className="field">
             <div className="field-head">
@@ -480,7 +480,7 @@ export default function App() {
             <div className="plan">
               <div className="row wrap">
                 <span className={`chip ${plan.source === "azure-openai" ? "ok" : ""}`}>
-                  {plan.source === "azure-openai" ? `Mapped by ${models.find((m) => m.deployment === plan.model)?.label || plan.model || "Azure OpenAI"}` : "Mapped by keyword rules"}
+                  {plan.source === "azure-openai" ? `Mapped by ${(() => { const m = models.find((x) => x.deployment === plan.model); return m ? shortName(m) : plan.model || "Azure OpenAI"; })()}` : "Mapped by keyword rules"}
                 </span>
                 {plan.usage && (
                   <span className="chip mono" title={`Price per 1M tokens: $${plan.usage.pricePer1M.input} in / $${plan.usage.pricePer1M.output} out (${plan.usage.priceSource})`}>
@@ -521,12 +521,19 @@ export default function App() {
                 <PlanTable title="Encounters (sorted by Encounter.class)" kind="encounters" items={plan.encounters} codeLabel="Group" onToggle={toggle} />
               )}
               <p className="hint">Also requested: <b>Patient</b> (biographical sheet).</p>
-              {(plan.intent || plan.usage) && (
-                <div className="row wrap plan-extras">
-                  {plan.intent && <IntentJson intent={plan.intent} />}
-                  {plan.usage && <TokenUsage usage={plan.usage} />}
-                </div>
-              )}
+              <div className="row wrap plan-extras">
+                {plan.intent && <IntentJson intent={plan.intent} />}
+                {plan.usage && <TokenUsage usage={plan.usage} />}
+                {models.length > 0 && (
+                  <button className="ghost small-btn" aria-expanded={usageOpen} onClick={() => {
+                    setUsageOpen((o) => !o); api.usage().then(setUsage).catch(() => {});
+                  }}>
+                    {usageOpen ? "Hide usage & cost" : `Usage & cost${usage ? ` · ${fmtUsd(usage.totalCostUsd)}` : ""}`}
+                  </button>
+                )}
+              </div>
+              {usageOpen && <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
+                onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />}
             </div>
           )}
         </section>
@@ -585,6 +592,17 @@ export default function App() {
 
 const fmtInt = (n) => (n ?? 0).toLocaleString("en-US");
 const fmtPrice = (n) => (n == null ? "–" : Number(n).toFixed(2));
+// A model's price for one call: USD per 1M input + output tokens.
+const priceOf = (m) => (m.input || 0) + (m.output || 0);
+// Costly to cheap.
+const byCost = (list) => [...list].sort((a, b) => priceOf(b) - priceOf(a));
+// The name without its version in brackets, e.g. "GPT-4o (2024-11-20)" -> "GPT-4o".
+const shortName = (m) => (m.label || m.deployment).replace(/\s*\([^)]*\)\s*$/, "");
+// Cost in stars: the costliest model gets one star per model, the cheapest one star.
+const stars = (m, list) => {
+  const prices = [...new Set(list.map(priceOf))].sort((a, b) => a - b);
+  return "★".repeat(prices.indexOf(priceOf(m)) + 1);
+};
 const fmtUsd = (n) => `$${(n ?? 0) < 0.01 ? (n ?? 0).toFixed(5) : (n ?? 0).toFixed(4)}`;
 
 function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
@@ -592,7 +610,7 @@ function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
   const [running, setRunning] = useState(false);
   const runCompare = async () => {
     setRunning(true);
-    setCompare(models.map((m) => ({ model: m.deployment, label: m.label, pending: true })));
+    setCompare(models.map((m) => ({ model: m.deployment, label: shortName(m), pending: true })));
     await Promise.all(models.map(async (m) => {
       let row;
       try { row = { plan: await api.plan(note, true, m.deployment) }; }
@@ -647,7 +665,7 @@ function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
               const t = byModel.find((b) => b.model === m.deployment);
               return (
                 <tr key={m.deployment}>
-                  <td title={m.priceSource}>{m.label}</td>
+                  <td title={m.priceSource}>{shortName(m)} <span className="stars">{stars(m, models)}</span></td>
                   <td className="r">{t?.calls || 0}</td>
                   <td className="r mono">{fmtInt(t?.inputTokens)}</td>
                   <td className="r mono">{fmtInt(t?.outputTokens)}</td>

@@ -597,6 +597,7 @@ pre.json {
 
 /* model picker and usage */
 .model-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.stars { color: #d97706; letter-spacing: 1px; }
 .model-select { margin-top: 0; font-size: 0.82rem; padding: 0.3rem 0.5rem; max-width: 26rem; }
 .usage-panel { border: 1px solid var(--border, #e5e7eb); border-radius: 10px; padding: 0.75rem; margin-bottom: 0.85rem; display: grid; gap: 0.6rem; }
 td.r, th.r { text-align: right; white-space: nowrap; }
