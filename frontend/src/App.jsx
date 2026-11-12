@@ -59,10 +59,11 @@ function packetResult(run) {
 
 const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
 
-// EHR sources. Swap the logo files in frontend/public/ehr/ for the official artwork.
+// EHR sources. Logos (frontend/public/ehr/): Oracle's wordmark from oracle.com (Cerner is now Oracle Health)
+// and ModMed's wordmark from modmed.com.
 const EHRS = [
-  { id: "cerner", name: "Cerner", logo: "/ehr/cerner.svg", ready: true },
-  { id: "modmed", name: "ModMed", logo: "/ehr/modmed.svg", ready: false },
+  { id: "cerner", name: "Cerner", caption: "Health · Cerner", logo: "/ehr/cerner.svg", ready: true },
+  { id: "modmed", name: "ModMed", caption: "", logo: "/ehr/modmed.svg", ready: false },
 ];
 
 export default function App() {
@@ -379,8 +380,8 @@ export default function App() {
             <button key={e.id} role="tab" aria-selected={e.id === ehrId}
               className={`ehr-tab ${e.id === ehrId ? "active" : ""} ${e.ready ? "" : "pending"}`}
               onClick={() => setEhrId(e.id)}>
-              <img src={e.logo} alt="" className="ehr-logo" />
-              <span className="ehr-name">{e.name}</span>
+              <img src={e.logo} alt={e.name} className={`ehr-logo ehr-logo-${e.id}`} />
+              {e.caption && <span className="ehr-name">{e.caption}</span>}
               {!e.ready && <span className="chip warn ehr-badge">In Development</span>}
             </button>
           ))}
@@ -388,7 +389,7 @@ export default function App() {
 
         {!ehr.ready ? (
           <section className="card ehr-soon">
-            <img src={ehr.logo} alt="" className="ehr-logo big" />
+            <img src={ehr.logo} alt={ehr.name} className={`ehr-logo big ehr-logo-${ehr.id}`} />
             <div>
               <h2>{ehr.name} (In Development)</h2>
               <p className="hint">The {ehr.name} connector is being built. Retrieval works the same way: the service note is

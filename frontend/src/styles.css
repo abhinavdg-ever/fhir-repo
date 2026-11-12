@@ -619,8 +619,12 @@ td.r, th.r { text-align: right; white-space: nowrap; }
 }
 .ehr-tab.active { border-color: var(--brand-700); box-shadow: 0 0 0 2px var(--brand-100); }
 .ehr-tab.pending .ehr-logo { opacity: 0.6; }
-.ehr-logo { width: 28px; height: 28px; border-radius: 7px; display: block; }
-.ehr-logo.big { width: 56px; height: 56px; border-radius: 12px; }
+.ehr-logo { height: 22px; width: auto; display: block; }
+.ehr-logo-cerner { height: 16px; }
+.ehr-logo.big { height: 40px; }
+.ehr-logo-cerner.big { height: 26px; margin-top: 0.4rem; }
+.ehr-tab { min-height: 48px; }
+.ehr-name { font-weight: 600; color: var(--muted, inherit); }
 .ehr-badge { font-size: 0.68rem; }
 .ehr-soon { display: flex; gap: 1rem; align-items: flex-start; }
 .ehr-soon h2 { margin-top: 0; }
