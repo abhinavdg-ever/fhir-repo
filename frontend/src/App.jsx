@@ -780,7 +780,7 @@ function TokenUsage({ usage }) {
   return (
     <div className="intent-json">
       <button className="ghost small-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {open ? "Hide token usage & approximate cost" : `Token usage & approximate cost · ${fmtUsd(usage.costUsd)}`}
+        {open ? "Hide Token & Cost" : `Token & Cost · ${fmtUsd(usage.costUsd)}`}
       </button>
       {open && (
         <div className="token-usage">
