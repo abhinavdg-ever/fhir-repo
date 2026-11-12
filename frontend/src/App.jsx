@@ -61,8 +61,8 @@ const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) =
 
 // EHR sources, each with its site's favicon (frontend/public/ehr/): Oracle's for Cerner (now Oracle Health), ModMed's.
 const EHRS = [
-  { id: "cerner", name: "Cerner", logo: "/ehr/cerner.png", ready: true },
-  { id: "modmed", name: "ModMed", logo: "/ehr/modmed.png", ready: false },
+  { id: "cerner", name: "Cerner", logo: "/ehr/cerner.png", ready: true, badge: "Beta" },
+  { id: "modmed", name: "ModMed", logo: "/ehr/modmed.png", ready: false, badge: "In Dev" },
 ];
 
 export default function App() {
@@ -381,7 +381,7 @@ export default function App() {
               onClick={() => setEhrId(e.id)}>
               <img src={e.logo} alt="" className="ehr-logo" />
               <span className="ehr-name">{e.name}</span>
-              {!e.ready && <span className="chip warn ehr-badge">In Development</span>}
+              {e.badge && <span className={`chip ${e.ready ? "ok" : "warn"} ehr-badge`}>{e.badge}</span>}
             </button>
           ))}
         </div>
@@ -390,7 +390,7 @@ export default function App() {
           <section className="card ehr-soon">
             <img src={ehr.logo} alt={ehr.name} className="ehr-logo big" />
             <div>
-              <h2>{ehr.name} (In Development)</h2>
+              <h2>{ehr.name} ({ehr.badge})</h2>
               <p className="hint">The {ehr.name} connector is being built. Retrieval works the same way: the service note is
                 translated into a LOINC plan, then the member's records are pulled from {ehr.name}. Use the Cerner tab for now.</p>
               <button className="ghost" onClick={() => setEhrId("cerner")}>Go to Cerner</button>
