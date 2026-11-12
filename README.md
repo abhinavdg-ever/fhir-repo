@@ -40,7 +40,7 @@ One container serves the API and the UI. Needs Docker with the compose plugin on
 
 ```bash
 git clone https://github.com/abhinavdg-ever/fhir-repo.git && cd fhir-repo
-cp .env.example .env            # then set AOAI_ENDPOINT, AOAI_DEPLOYMENT, AOAI_API_KEY
+cp .env.example .env            # then set AOAI_ENDPOINT and AOAI_API_KEY
 docker compose up -d --build
 ```
 
@@ -149,8 +149,7 @@ curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.c
 | Variable | What it does |
 | --- | --- |
 | `AOAI_ENDPOINT` | `https://<resource>.openai.azure.com` — empty/placeholder = LLM off |
-| `AOAI_DEPLOYMENT` | default **deployment** name, e.g. `gpt-4o` |
-| `AOAI_MODELS` | deployments offered in the model picker (comma separated) |
+| `AOAI_MODELS` | Foundry **deployment** names offered in the model picker, comma separated; the first is the default |
 | `LLM_PRICES` | optional JSON price override, USD per 1M tokens: `{"gpt-4o": [2.5, 10, 1.25]}` (input, output, cached) |
 | `LLM_REDACT` | `true` (default) redacts PII/PHI from the note before the LLM call; `false` sends it as typed |
 | `LLM_REDACT_DATES` | `true` (default) also redacts full dates; years always stay |

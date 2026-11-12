@@ -370,7 +370,7 @@ export default function App() {
           <div className="card-head">
             <h2>Request</h2>
             <div className="model-row">
-            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env" : "Read the service note with Azure OpenAI; untick for keyword rules"}>
+            <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_API_KEY in .env" : "Read the service note with Azure OpenAI; untick for keyword rules"}>
               <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
               Use Azure OpenAI
             </label>

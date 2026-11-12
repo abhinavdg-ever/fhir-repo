@@ -24,7 +24,7 @@ from common.models import (ClinicalIntent, ClinicalTarget, DateWindow, Plan, Pla
                            ResourceGroup)
 
 
-from agent.llm import LlmError, chat_json, get_model  # noqa: E402  (LlmError: not configured or the call failed)
+from agent.llm import LlmError, chat_json, default_deployment, get_model  # noqa: E402  (LlmError: not configured or the call failed)
 
 
 # Words that let the job envelope run to today instead of stopping at the last year named.
@@ -302,14 +302,14 @@ def _env(name: str, default: str = "") -> str:
 
 
 def llm_configured() -> bool:
-    return bool(_env("AOAI_ENDPOINT") and _env("AOAI_DEPLOYMENT"))
+    return bool(_env("AOAI_ENDPOINT"))
 
 
 def llm_settings(model: str | None = None) -> dict:
     """The knobs you can change in .env to try different models or behaviour."""
     temperature = _env("AOAI_TEMPERATURE", "0")
     return {
-        "deployment": model or _env("AOAI_DEPLOYMENT"),
+        "deployment": model or default_deployment(),
         "apiVersion": "v1",
         "temperature": float(temperature) if temperature else None,
         "timeout": float(_env("AOAI_TIMEOUT", "30") or 30),
@@ -368,7 +368,7 @@ def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
 
 def llm_plan(note: str, today: date | None = None, model: str | None = None) -> Plan:
     if not llm_configured():
-        raise LlmError("Azure OpenAI is not configured: set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env")
+        raise LlmError("Azure OpenAI is not configured: set AOAI_ENDPOINT in .env")
     today = today or date.today()
     s = llm_settings(model)
     m = get_model(s["deployment"])

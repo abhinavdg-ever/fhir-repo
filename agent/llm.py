@@ -54,6 +54,19 @@ def _env(name: str, default: str = "") -> str:
     return "" if "<" in value else value
 
 
+def _model_names() -> list[str]:
+    """AOAI_MODELS (first = default), else the built-in catalog. A legacy AOAI_DEPLOYMENT goes first."""
+    names = [n.strip() for n in _env("AOAI_MODELS").split(",") if n.strip()] or [m.deployment for m in CATALOG]
+    legacy = _env("AOAI_DEPLOYMENT")
+    if legacy:
+        names = [legacy] + [n for n in names if n != legacy]
+    return names
+
+
+def default_deployment() -> str:
+    return _model_names()[0]
+
+
 def models() -> list[Model]:
     """The catalog, limited to AOAI_MODELS when set, plus any deployment named there that is not in it."""
     by_name = {m.deployment: m for m in CATALOG}
@@ -63,12 +76,8 @@ def models() -> list[Model]:
             overrides = json.loads(_env("LLM_PRICES"))
         except ValueError:
             overrides = {}
-    names = [n.strip() for n in _env("AOAI_MODELS").split(",") if n.strip()] or [m.deployment for m in CATALOG]
-    default = _env("AOAI_DEPLOYMENT")
-    if default and default not in names:
-        names.insert(0, default)
     out = []
-    for name in names:
+    for name in _model_names():
         m = by_name.get(name) or Model(name, name, "anthropic" if name.lower().startswith("claude") else "openai",
                                        0.0, 0.0, json_mode=not name.lower().startswith("claude"),
                                        price_source="unknown: set LLM_PRICES in .env")
@@ -81,7 +90,7 @@ def models() -> list[Model]:
 
 
 def get_model(name: str | None) -> Model:
-    name = name or _env("AOAI_DEPLOYMENT")
+    name = name or default_deployment()
     for m in models():
         if m.deployment == name:
             return m

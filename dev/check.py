@@ -103,7 +103,7 @@ def main() -> int:
             print(f"[{SKIP}] Binary download: no note with a file found for this patient")
 
     # 4. Azure OpenAI (optional)
-    endpoint, deployment, key = _setting("AOAI_ENDPOINT"), _setting("AOAI_DEPLOYMENT"), _setting("AOAI_API_KEY")
+    endpoint, deployment, key = _setting("AOAI_ENDPOINT"), (_setting("AOAI_DEPLOYMENT") or _setting("AOAI_MODELS").split(",")[0].strip()), _setting("AOAI_API_KEY")
     if not (endpoint and deployment):
         print(f"[{SKIP}] Azure OpenAI: not configured (keyword rules still work)")
     elif not key:
@@ -116,7 +116,7 @@ def main() -> int:
                 names = [d.get("id") for d in r.json().get("data", [])]
                 found = deployment in names
                 print(f"[{OK if found else FAIL}] Azure OpenAI: reachable; deployments {names}"
-                      + ("" if found else f" - AOAI_DEPLOYMENT={deployment} is not one of them"))
+                      + ("" if found else f" - {deployment} is not one of them (this older listing may omit Foundry models; the app can still reach them)"))
                 failures += not found
             elif r.status_code in (401, 403):
                 failures += 1
