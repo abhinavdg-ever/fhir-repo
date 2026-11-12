@@ -610,7 +610,10 @@ td.r, th.r { text-align: right; white-space: nowrap; }
 .token-usage > .usage-panel { margin-bottom: 0; }
 
 /* EHR tabs */
-.ehr-tabs { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.ehr-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem 1rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.ehr-tabs { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.ehr-meta { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
+.ehr-meta .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ehr-tab {
   display: inline-flex; align-items: center; gap: 0.6rem;
   padding: 0.55rem 0.9rem; border-radius: 12px;

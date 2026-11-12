@@ -356,14 +356,6 @@ export default function App() {
         <div className="topbar-meta">
           {health && (
             <>
-              {(() => {
-                const base = ehrId === "cerner" ? health.fhirBase : health.modmedFhirBase;
-                return (
-                  <span className={`chip mono ${base ? "" : "warn"}`} title={`${ehr.name} FHIR base URL`}>
-                    {ehr.name} FHIR: {base || "not connected yet"}
-                  </span>
-                );
-              })()}
               <span className={`chip ${health.llm ? "ok" : "warn"}`}>
                 {health.llm
                   ? `Azure AI Foundry · ${useLlm ? (modelInfo ? modelName : health.llmDeployment) : "keyword rules"}`
@@ -371,7 +363,6 @@ export default function App() {
               </span>
             </>
           )}
-          <button className="ghost start-over" onClick={startOver} title="Clear everything, including the API trace">↺ Start over</button>
         </div>
       </header>
 
@@ -381,6 +372,7 @@ export default function App() {
           <p>Pick the EHR, enter the service note and the member, review the LOINC plan, then pull every matching record.</p>
         </div>
 
+        <div className="ehr-bar">
         <div className="ehr-tabs" role="tablist" aria-label="EHR">
           {EHRS.map((e) => (
             <button key={e.id} role="tab" aria-selected={e.id === ehrId}
@@ -391,6 +383,18 @@ export default function App() {
               {e.badge && <span className={`chip ${e.ready ? "ok" : "warn"} ehr-badge`}>{e.badge}</span>}
             </button>
           ))}
+        </div>
+        <div className="ehr-meta">
+          {health && (() => {
+            const base = ehrId === "cerner" ? health.fhirBase : health.modmedFhirBase;
+            return (
+              <span className={`chip mono ${base ? "" : "warn"}`} title={`${ehr.name} FHIR base URL`}>
+                FHIR: {base || "not connected yet"}
+              </span>
+            );
+          })()}
+          {ehr.ready && <button className="ghost start-over" onClick={startOver} title="Clear this request, including the API trace">↺ Start over</button>}
+        </div>
         </div>
 
         {!ehr.ready ? (
