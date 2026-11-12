@@ -86,8 +86,11 @@ export const api = {
 
   health: () => call("/api/health"),
   catalog: () => call("/api/catalog"),
-  prompt: (service_note) =>
-    call("/api/prompt", { method: "POST", body: JSON.stringify({ service_note, use_llm: true }) }),
+  prompt: (service_note, model) =>
+    call("/api/prompt", { method: "POST", body: JSON.stringify({ service_note, use_llm: true, model }) }),
+  models: () => call("/api/models"),
+  usage: () => call("/api/usage"),
+  clearUsage: () => call("/api/usage", { method: "DELETE" }),
   encounters: (patient, start, end, ids = []) => {
     const q = new URLSearchParams({ patient });
     if (start) q.set("start", start);
@@ -97,8 +100,8 @@ export const api = {
   },
   encounterDocs: (patient, encounterId) =>
     call(`/api/encounters/${encodeURIComponent(encounterId)}/documents?${new URLSearchParams({ patient })}`),
-  plan: (service_note, use_llm) =>
-    call("/api/plan", { method: "POST", body: JSON.stringify({ service_note, use_llm }) }),
+  plan: (service_note, use_llm, model) =>
+    call("/api/plan", { method: "POST", body: JSON.stringify({ service_note, use_llm, model }) }),
   patients: (name, birthdate) => {
     const q = new URLSearchParams({ name });
     if (birthdate) q.set("birthdate", birthdate);

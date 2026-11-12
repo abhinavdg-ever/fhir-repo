@@ -594,3 +594,15 @@ pre.json {
   .trace-row .ms { display: none; }
   .trace-bar { padding: 0.4rem 1rem; }
 }
+
+/* model picker and usage */
+.model-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.model-select { margin-top: 0; font-size: 0.82rem; padding: 0.3rem 0.5rem; max-width: 26rem; }
+.usage-panel { border: 1px solid var(--border, #e5e7eb); border-radius: 10px; padding: 0.75rem; margin-bottom: 0.85rem; display: grid; gap: 0.6rem; }
+td.r, th.r { text-align: right; white-space: nowrap; }
+.total-row td { border-top: 2px solid var(--border, #e5e7eb); }
+.error-text { color: var(--bad-fg); }
+@media (max-width: 640px) { .model-select { max-width: 100%; width: 100%; } }
+.plan-extras { align-items: flex-start; }
+.plan-extras .intent-json { flex: 1 1 100%; }
+.token-usage { margin-top: 0.5rem; display: grid; gap: 0.4rem; }

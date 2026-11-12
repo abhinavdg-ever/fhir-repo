@@ -3,6 +3,8 @@
   GET  /api/health     FHIR base and whether Azure OpenAI is configured
   GET  /api/catalog    allowed document and result codes
   POST /api/plan       service note -> LOINC plan (502 if the LLM fails)
+  GET  /api/models     the model deployments to pick from, with prices
+  GET  /api/usage      input/output tokens and cost of the model calls so far (DELETE clears)
   POST /api/prompt     the exact messages and settings that /api/plan would send to the model
   GET  /api/patients   find the member by name (+ optional DOB) or Patient ID
   POST /api/run        run the plan against Cerner (worker.main.handle_job)
@@ -44,6 +46,8 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from agent.doc_types import DOCUMENT_CODES, OBSERVATION_CODES  # noqa: E402
+from agent.redact import enabled as redact_enabled  # noqa: E402
+from agent.llm import get_model, models as llm_models, reset_usage, usage_summary  # noqa: E402
 from agent.planner import LlmError, build_messages, llm_configured, llm_settings, make_plan  # noqa: E402
 from common.models import PacketRequest, Plan, PlanRequest, RunRequest  # noqa: E402
 from worker.fhir_client import (CALL_LOG, FhirClient, FhirError, doc_summary,  # noqa: E402
@@ -90,17 +94,45 @@ async def plan(req: PlanRequest):
     if not req.service_note.strip():
         raise HTTPException(400, "Service note is empty")
     try:
-        # The OpenAI SDK call is blocking; keep it off the event loop.
-        return await asyncio.to_thread(make_plan, req.service_note, req.use_llm)
+        # The model call is blocking; keep it off the event loop.
+        return await asyncio.to_thread(make_plan, req.service_note, req.use_llm, req.model)
     except LlmError as e:
         raise HTTPException(502, str(e))
 
 
 @app.post("/api/prompt")
 def prompt(req: PlanRequest):
-    s = llm_settings()
-    return {"deployment": s["deployment"] or None, "apiVersion": s["apiVersion"], "temperature": s["temperature"],
-            "responseFormat": "json_object", "messages": build_messages(req.service_note)}
+    s = llm_settings(req.model)
+    try:
+        m = get_model(s["deployment"])
+        messages = build_messages(req.service_note)
+    except LlmError as e:
+        raise HTTPException(502, str(e))
+    return {"deployment": m.deployment, "api": m.api, "apiVersion": s["apiVersion"], "temperature": s["temperature"],
+            "responseFormat": "json_object" if m.json_mode else "text (JSON asked in the prompt)",
+            "redacted": redact_enabled(), "messages": messages}
+
+
+@app.get("/api/models")
+def list_models():
+    """The deployments the UI can pick from, with their price per 1M tokens (USD)."""
+    default = llm_settings()["deployment"]
+    return {"default": default, "models": [
+        {"deployment": m.deployment, "label": m.label, "api": m.api, "input": m.input, "cached": m.cached,
+         "output": m.output, "priceSource": m.price_source, "default": m.deployment == default}
+        for m in llm_models()]}
+
+
+@app.get("/api/usage")
+def usage():
+    """Tokens and cost of every model call since the server started."""
+    return usage_summary()
+
+
+@app.delete("/api/usage")
+def clear_usage():
+    reset_usage()
+    return usage_summary()
 
 
 @app.get("/api/patients")

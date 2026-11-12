@@ -4,7 +4,7 @@ Paste a payer chart-chase **service note** and a **member**. The app:
 
 Enter the service note and the member (name + date of birth, or Patient ID) together at the top, then:
 
-1. **Plans** — Azure OpenAI (gpt-4o-mini, JSON mode) turns the note into document LOINC codes, result LOINC codes and a date window. Every code is checked against the allow-list in `agent/doc_types.py`; anything else is dropped. Untick "Use Azure OpenAI" to use keyword rules instead (no silent fallback).
+1. **Plans** — a model on Azure AI Foundry (pick it in the Request card: GPT-4o, GPT-4.1 mini, Llama 4 Maverick, Mistral Small, Claude Haiku 4.5) turns the note into document LOINC codes, result LOINC codes and a date window. Every code is checked against the allow-list in `agent/doc_types.py`; anything else is dropped. Untick "Use Azure OpenAI" to use keyword rules instead (no silent fallback). The note is redacted with [phileas-redact](https://github.com/philterd/phileas-python) on this machine before it is sent (`agent/redact.py`): names, DOB and other dates, member IDs / MRNs, phone, email, address, ZIP, SSN become `[REDACTED-<type>]`; years and LOINC codes are kept. If redaction fails, nothing is sent.
 2. **Finds the patient** in Cerner (`Patient?name=` or a Patient ID).
 3. **Requests each LOINC code** — one `DocumentReference?patient=…&type=http://loinc.org|{code}&period=ge…&period=lt…` per code, plus one `Observation` search for BP / HbA1c / GMI.
 4. **Packages** — streams each note from its `Binary` URL and builds a zip (notes + biographical sheet + missing-items sheet) **in memory**. Nothing is written to disk.
@@ -149,8 +149,11 @@ curl.exe --ssl-no-revoke -H "Accept: application/fhir+json" "https://fhir-open.c
 | Variable | What it does |
 | --- | --- |
 | `AOAI_ENDPOINT` | `https://<resource>.openai.azure.com` — empty/placeholder = LLM off |
-| `AOAI_DEPLOYMENT` | Azure **deployment** name, e.g. `gpt-4o-mini`; swap to try another model |
-| `AOAI_API_VERSION` | default `2024-10-21` |
+| `AOAI_DEPLOYMENT` | default **deployment** name, e.g. `gpt-4o` |
+| `AOAI_MODELS` | deployments offered in the model picker (comma separated) |
+| `LLM_PRICES` | optional JSON price override, USD per 1M tokens: `{"gpt-4o": [2.5, 10, 1.25]}` (input, output, cached) |
+| `LLM_REDACT` | `true` (default) redacts PII/PHI from the note before the LLM call; `false` sends it as typed |
+| `LLM_REDACT_DATES` | `true` (default) also redacts full dates; years always stay |
 | `AOAI_API_KEY` | key, or leave empty and use Entra ID (`pip install azure-identity`, `az login`) |
 | `AOAI_TEMPERATURE` | default `0`; leave empty to send none (gpt-5 / o-series). If the model rejects temperature, the call is retried without it |
 | `AOAI_TIMEOUT` | seconds per call, default `30` |
@@ -232,7 +235,9 @@ The **API trace** panel at the bottom lists every call for the current request �
 | GET | `/api/health` | — | `{fhirBase, llm, llmDeployment, llmTemperature}` |
 | GET | `/api/catalog` | — | allowed document and result codes |
 | POST | `/api/plan` | `{service_note, use_llm}` | plan (502 on LLM error) |
-| POST | `/api/prompt` | `{service_note}` | the exact messages and settings `/api/plan` sends to the model |
+| GET | `/api/models` | | the model deployments and their price per 1M tokens |
+| GET / DELETE | `/api/usage` | | input / output tokens and cost of every model call since the server started (DELETE clears) |
+| POST | `/api/prompt` | `{service_note}` | the exact (redacted) messages and settings `/api/plan` sends to the model |
 | GET | `/api/patients` | `name`, `birthdate?` | patient summaries |
 | POST | `/api/run` | `{patient_id, plan, apply_dates, title_fallback}` | rows per LOINC call, observations, missing codes |
 | POST | `/api/run/stream` | same as `/api/run` | NDJSON events: `start`, `row` (one per LOINC call), `sweep`, `observations`, `done` |
@@ -246,3 +251,17 @@ The **API trace** panel at the bottom lists every call for the current request �
 ## Before real patient data
 
 Demo only: no login, no audit log. For a real tenant add SMART backend-services auth (`system/Patient.rs system/DocumentReference.rs system/Binary.r system/Observation.rs`), Key Vault / managed identity instead of `.env`, a Service Bus queue for large batches, and confirm the LOINC list against loinc.org and your NCQA value sets.
+
+## Models, tokens and cost
+
+The Request card has a model picker (from `AOAI_MODELS`). Every plan shows the tokens it used, its cost and how long it took; **Usage & cost** shows the totals per model since the server started, and **Compare all models on this note** sends the same (redacted) note to every model side by side.
+
+| Deployment | API | Input / 1M | Output / 1M | Price source |
+|---|---|---|---|---|
+| gpt-4o (2024-11-20) | OpenAI v1 | $2.50 | $10.00 | Azure Retail Prices API, Global |
+| gpt-4.1-mini | OpenAI v1 | $0.40 | $1.60 | Azure Retail Prices API, Global |
+| Llama-4-Maverick-17B-128E-Instruct-FP8 | OpenAI v1 | $0.25 | $1.00 | Azure Retail Prices API, Global |
+| mistral-small-2503 | OpenAI v1 | $0.10 | $0.30 | Mistral list price (Marketplace) |
+| claude-haiku-4-5 | Anthropic Messages | $1.00 | $5.00 | Anthropic list price (Marketplace) |
+
+Cost = input × input price + output × output price (cached input at its own price). The usage ledger is in memory and resets when the server restarts. Check your Azure invoice for the billed amounts.

@@ -64,6 +64,10 @@ export default function App() {
   const [catalog, setCatalog] = useState({ documents: [], observations: [] });
   const [note, setNote] = useState(SAMPLES.TRC);
   const [useLlm, setUseLlm] = useState(true);
+  const [models, setModels] = useState([]); // deployments to pick from, with prices
+  const [model, setModel] = useState("");
+  const [usage, setUsage] = useState(null); // tokens and cost of the model calls so far
+  const [usageOpen, setUsageOpen] = useState(false);
   const [plan, setPlan] = useState(null);
   const [name, setName] = useState("");
   const [dob, setDob] = useState("");
@@ -96,7 +100,16 @@ export default function App() {
       })
       .catch((e) => setError(`Backend not reachable: ${e.message}`));
     api.catalog().then(setCatalog).catch(() => {});
+    api.models().then((m) => { setModels(m.models); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
+    api.usage().then(setUsage).catch(() => {});
   }, []);
+
+  const modelInfo = models.find((m) => m.deployment === model);
+  const modelName = modelInfo?.label || model || "Azure OpenAI";
+  const askPlan = async () => {
+    try { return await api.plan(note, useLlm, useLlm ? model : undefined); }
+    finally { if (useLlm) api.usage().then(setUsage).catch(() => {}); }
+  };
 
   // Poll the background packet job until it finishes, then save the zip.
   useEffect(() => {
@@ -143,12 +156,12 @@ export default function App() {
 
   // Translate the note and look up the member at the same time.
   const start = () =>
-    step(useLlm ? "Asking Azure OpenAI to read the service note and looking up the member…" : "Mapping the note and looking up the member…", async () => {
+    step(useLlm ? `Asking ${modelName} to read the service note and looking up the member…` : "Mapping the note and looking up the member…", async () => {
       setRun(null);
       setPlan(null);
       setPatients(null);
       setPatientId("");
-      const [planRes, patientsRes] = await Promise.allSettled([api.plan(note, useLlm), api.patients(name.trim(), dob)]);
+      const [planRes, patientsRes] = await Promise.allSettled([askPlan(), api.patients(name.trim(), dob)]);
       const problems = [];
       if (planRes.status === "fulfilled") {
         adoptPlan(planRes.value);
@@ -175,8 +188,8 @@ export default function App() {
   };
 
   const retranslate = () =>
-    step(useLlm ? "Asking Azure OpenAI to read the service note…" : "Applying keyword rules…", async () => {
-      adoptPlan(await api.plan(note, useLlm));
+    step(useLlm ? `Asking ${modelName} to read the service note…` : "Applying keyword rules…", async () => {
+      adoptPlan(await askPlan());
       setRun(null);
     });
 
@@ -334,7 +347,7 @@ export default function App() {
               <span className="chip mono" title="FHIR base URL">FHIR: {health.fhirBase}</span>
               <span className={`chip ${health.llm ? "ok" : "warn"}`}>
                 {health.llm
-                  ? `Azure OpenAI · ${health.llmDeployment}${health.llmTemperature != null ? ` · t=${health.llmTemperature}` : ""}`
+                  ? `Azure AI Foundry · ${useLlm ? model || health.llmDeployment : "keyword rules"}${health.llmTemperature != null ? ` · t=${health.llmTemperature}` : ""}`
                   : "Azure OpenAI not configured"}
               </span>
             </>
@@ -356,11 +369,30 @@ export default function App() {
         <section className="card request-card">
           <div className="card-head">
             <h2>Request</h2>
+            <div className="model-row">
             <label className="check" title={health && !health.llm ? "Set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env" : "Read the service note with Azure OpenAI; untick for keyword rules"}>
               <input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} />
               Use Azure OpenAI
             </label>
+            {models.length > 0 && (
+              <select className="model-select" value={model} onChange={(e) => { setModel(e.target.value); setPrompt(null); }}
+                disabled={!useLlm} aria-label="Model" title="Azure AI Foundry deployment that reads the service note">
+                {models.map((m) => (
+                  <option key={m.deployment} value={m.deployment}>
+                    {m.label} · ${fmtPrice(m.input)} in / ${fmtPrice(m.output)} out per 1M
+                  </option>
+                ))}
+              </select>
+            )}
+            <button className="ghost small-btn" aria-expanded={usageOpen} onClick={() => {
+              setUsageOpen((o) => !o); api.usage().then(setUsage).catch(() => {});
+            }}>
+              Usage &amp; cost{usage ? ` · ${fmtUsd(usage.totalCostUsd)}` : ""}
+            </button>
+            </div>
           </div>
+          {usageOpen && <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
+            onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />}
 
           <div className="field">
             <div className="field-head">
@@ -433,23 +465,28 @@ export default function App() {
               onClick={() => {
                 if (prompt) { setPrompt(null); return; }
                 setPromptError("");
-                api.prompt(note).then(setPrompt).catch((e) => setPromptError(e.message));
+                api.prompt(note, model).then((p) => setPrompt({ ...p, note })).catch((e) => setPromptError(e.message));
               }}>
               {prompt ? "Hide prompt" : "View prompt"}
             </button>
           </div>
           {promptError && <div className="banner error small">{promptError}</div>}
-          {prompt && <PromptView prompt={prompt} onRefresh={() => api.prompt(note).then(setPrompt)} stale={!prompt.messages[1].content.endsWith(note)} />}
+          {prompt && <PromptView prompt={prompt} onRefresh={() => api.prompt(note, model).then((p) => setPrompt({ ...p, note })).catch((e) => setPromptError(e.message))} stale={prompt.note !== note} />}
         </section>
 
         <section className={`card ${plan ? "" : "dim"}`}>
-          <h2><span className="num">1</span> LOINC plan</h2>
+          <h2><span className="r">1</span> LOINC plan</h2>
           {!plan ? <p className="hint">The codes and date window read from the service note appear here.</p> : (
             <div className="plan">
               <div className="row wrap">
                 <span className={`chip ${plan.source === "azure-openai" ? "ok" : ""}`}>
-                  {plan.source === "azure-openai" ? "Mapped by Azure OpenAI" : "Mapped by keyword rules"}
+                  {plan.source === "azure-openai" ? `Mapped by ${models.find((m) => m.deployment === plan.model)?.label || plan.model || "Azure OpenAI"}` : "Mapped by keyword rules"}
                 </span>
+                {plan.usage && (
+                  <span className="chip mono" title={`Price per 1M tokens: $${plan.usage.pricePer1M.input} in / $${plan.usage.pricePer1M.output} out (${plan.usage.priceSource})`}>
+                    {fmtInt(plan.usage.inputTokens)} in · {fmtInt(plan.usage.outputTokens)} out · {fmtUsd(plan.usage.costUsd)} · {(plan.usage.latencyMs / 1000).toFixed(1)} s
+                  </span>
+                )}
                 <span className="chip">Measures: {plan.measures.join(", ") || "generic"}</span>
                 {plan.intent && <span className="chip">Mode: {plan.intent.mode.replace(/_/g, " ")}</span>}
                 {plan.intent && <span className="chip" title="What happens when items are missing">Fallback: {plan.intent.fallback_strategy.replace(/_/g, " ")}</span>}
@@ -484,13 +521,18 @@ export default function App() {
                 <PlanTable title="Encounters (sorted by Encounter.class)" kind="encounters" items={plan.encounters} codeLabel="Group" onToggle={toggle} />
               )}
               <p className="hint">Also requested: <b>Patient</b> (biographical sheet).</p>
-              {plan.intent && <IntentJson intent={plan.intent} />}
+              {(plan.intent || plan.usage) && (
+                <div className="row wrap plan-extras">
+                  {plan.intent && <IntentJson intent={plan.intent} />}
+                  {plan.usage && <TokenUsage usage={plan.usage} />}
+                </div>
+              )}
             </div>
           )}
         </section>
 
         <section className={`card ${patients ? "" : "dim"}`}>
-          <h2><span className="num">2</span> Member Confirmation</h2>
+          <h2><span className="r">2</span> Member Confirmation</h2>
           {!patients && <p className="hint">Matches for the member you entered appear here.</p>}
           {patients && patients.length === 0 && (
             <div className="banner warn">No patient matches “{name}”{dob ? ` born ${toUS(dob)}` : ""}. Check the spelling, DOB or Patient ID above and try again.</div>
@@ -504,7 +546,7 @@ export default function App() {
         </section>
 
         <section className={`card ${plan && patientId ? "" : "dim"}`}>
-          <h2><span className="num">3</span> Download Package</h2>
+          <h2><span className="r">3</span> Download Package</h2>
           <div className="row wrap">
             <label className="check">
               <input type="checkbox" checked={applyDates} onChange={(e) => setApplyDates(e.target.checked)} />
@@ -541,16 +583,105 @@ export default function App() {
   );
 }
 
+const fmtInt = (n) => (n ?? 0).toLocaleString("en-US");
+const fmtPrice = (n) => (n == null ? "–" : Number(n).toFixed(2));
+const fmtUsd = (n) => `$${(n ?? 0) < 0.01 ? (n ?? 0).toFixed(5) : (n ?? 0).toFixed(4)}`;
+
+function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
+  const [compare, setCompare] = useState(null); // [{ model, label, plan?, error? }]
+  const [running, setRunning] = useState(false);
+  const runCompare = async () => {
+    setRunning(true);
+    setCompare(models.map((m) => ({ model: m.deployment, label: m.label, pending: true })));
+    await Promise.all(models.map(async (m) => {
+      let row;
+      try { row = { plan: await api.plan(note, true, m.deployment) }; }
+      catch (e) { row = { error: e.message }; }
+      setCompare((rows) => rows.map((r) => (r.model === m.deployment ? { ...r, pending: false, ...row } : r)));
+    }));
+    setRunning(false);
+    api.usage().then(onUsage).catch(() => {});
+  };
+  const byModel = usage?.byModel || [];
+  return (
+    <div className="usage-panel">
+      <div className="row wrap">
+        <span className="hint">Tokens and cost of every model call since the server started (USD, Azure Global Standard pay-as-you-go).</span>
+        <button className="ghost small-btn" onClick={runCompare} disabled={running || busy || !note.trim()}
+          title="Send this service note to every model and compare tokens, cost, speed and the plan each returns">
+          {running ? "Comparing…" : "Compare all models on this note"}
+        </button>
+        <button className="ghost small-btn" onClick={onClear} disabled={running}>Clear usage</button>
+      </div>
+      {compare && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Model</th><th className="r">Input</th><th className="r">Output</th><th className="r">Cost</th><th className="r">Time</th><th>Measures</th><th>Job window</th><th className="r">Doc codes</th><th>Encounters</th></tr></thead>
+            <tbody>
+              {compare.map((r) => (
+                <tr key={r.model}>
+                  <td>{r.label}</td>
+                  {r.pending ? <td colSpan={8} className="hint">Waiting for the model…</td>
+                    : r.error ? <td colSpan={8} className="error-text">{r.error}</td>
+                    : <>
+                      <td className="r mono">{fmtInt(r.plan.usage?.inputTokens)}</td>
+                      <td className="r mono">{fmtInt(r.plan.usage?.outputTokens)}</td>
+                      <td className="r mono">{fmtUsd(r.plan.usage?.costUsd)}</td>
+                      <td className="r mono">{((r.plan.usage?.latencyMs || 0) / 1000).toFixed(1)} s</td>
+                      <td>{r.plan.measures.join(", ") || "generic"}</td>
+                      <td className="mono">{toUS(r.plan.start)} – {toUS(r.plan.end)}</td>
+                      <td className="r">{r.plan.documents.length}</td>
+                      <td>{r.plan.encounters.map((e) => e.code.replace(/_/g, " ")).join(", ") || "–"}</td>
+                    </>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Model</th><th className="r">Calls</th><th className="r">Input tokens</th><th className="r">Output tokens</th><th className="r">Cost</th><th className="r">Price / 1M (in · out)</th></tr></thead>
+          <tbody>
+            {models.map((m) => {
+              const t = byModel.find((b) => b.model === m.deployment);
+              return (
+                <tr key={m.deployment}>
+                  <td title={m.priceSource}>{m.label}</td>
+                  <td className="r">{t?.calls || 0}</td>
+                  <td className="r mono">{fmtInt(t?.inputTokens)}</td>
+                  <td className="r mono">{fmtInt(t?.outputTokens)}</td>
+                  <td className="r mono">{fmtUsd(t?.costUsd)}</td>
+                  <td className="r mono" title={m.priceSource}>${fmtPrice(m.input)} · ${fmtPrice(m.output)}</td>
+                </tr>
+              );
+            })}
+            <tr className="total-row">
+              <td><b>Total</b></td>
+              <td className="r">{byModel.reduce((a, b) => a + b.calls, 0)}</td>
+              <td className="r mono">{fmtInt(byModel.reduce((a, b) => a + b.inputTokens, 0))}</td>
+              <td className="r mono">{fmtInt(byModel.reduce((a, b) => a + b.outputTokens, 0))}</td>
+              <td className="r mono"><b>{fmtUsd(usage?.totalCostUsd)}</b></td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function PromptView({ prompt, onRefresh, stale }) {
   return (
     <div className="prompt">
       <div className="prompt-head">
         <span className="hint">
-          What <b>Translate</b> sends to Azure OpenAI
+          What <b>Translate</b> sends to the model
           {prompt.deployment ? <> · deployment <span className="mono">{prompt.deployment}</span></> : " · (no deployment configured)"}
-          {" · "}API <span className="mono">{prompt.apiVersion}</span>
+          {" · "}API <span className="mono">{prompt.api === "anthropic" ? "Anthropic Messages" : `OpenAI ${prompt.apiVersion}`}</span>
           {" · "}temperature <span className="mono">{prompt.temperature ?? "default"}</span>
           {" · "}response_format <span className="mono">{prompt.responseFormat}</span>
+          {" · "}{prompt.redacted ? <>PII/PHI <b>redacted</b> (phileas)</> : <b>not redacted</b>}
         </span>
         {stale && <button className="ghost small-btn" onClick={onRefresh}>Refresh for the current note</button>}
       </div>
@@ -632,6 +763,47 @@ function IntentJson({ intent }) {
         {open ? "Hide agent output (JSON)" : "Agent output (JSON)"}
       </button>
       {open && <pre className="json">{JSON.stringify(intent, null, 2)}</pre>}
+    </div>
+  );
+}
+
+function TokenUsage({ usage }) {
+  const [open, setOpen] = useState(false);
+  const p = usage.pricePer1M || {};
+  const cachedRate = p.cached ?? p.input;
+  const fresh = Math.max((usage.inputTokens || 0) - (usage.cachedTokens || 0), 0);
+  const rows = [
+    ["Input tokens", fresh, p.input],
+    ...(usage.cachedTokens ? [["Cached input tokens", usage.cachedTokens, cachedRate]] : []),
+    ["Output tokens", usage.outputTokens || 0, p.output],
+  ];
+  return (
+    <div className="intent-json">
+      <button className="ghost small-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        {open ? "Hide token usage & approximate cost" : `Token usage & approximate cost · ${fmtUsd(usage.costUsd)}`}
+      </button>
+      {open && (
+        <div className="token-usage">
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>{usage.label || usage.model}</th><th className="r">Tokens</th><th className="r">Price / 1M</th><th className="r">Approx. cost</th></tr></thead>
+              <tbody>
+                {rows.map(([k, n, rate]) => (
+                  <tr key={k}><td>{k}</td><td className="r mono">{fmtInt(n)}</td><td className="r mono">${fmtPrice(rate)}</td>
+                    <td className="r mono">{fmtUsd((n * (rate || 0)) / 1e6)}</td></tr>
+                ))}
+                <tr className="total-row"><td><b>Total</b></td><td className="r mono">{fmtInt((usage.inputTokens || 0) + (usage.outputTokens || 0))}</td>
+                  <td /><td className="r mono"><b>{fmtUsd(usage.costUsd)}</b></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="hint">
+            Deployment <span className="mono">{usage.model}</span> · {(usage.latencyMs / 1000).toFixed(1)} s · prices: {usage.priceSource}.
+            Approximate: USD pay-as-you-go list prices; your Azure invoice is the billed amount.
+            About {fmtUsd(usage.costUsd * 1000)} per 1,000 notes like this one.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

@@ -57,6 +57,8 @@ class Plan(BaseModel):
     obs_start: str | None = None  # Observation window (measurement year / any_history); None = no lower bound
     obs_end: str | None = None    # exclusive
     source: str = "rules"  # "azure-openai" | "rules"
+    model: str | None = None   # the deployment that mapped it (source azure-openai)
+    usage: dict | None = None  # tokens and cost of that call
     notes: str = ""
     all_records: bool = False  # the note asks for all medical records: every record goes in the packet
     intent: ClinicalIntent | None = None  # the agent output this plan was built from
@@ -65,6 +67,7 @@ class Plan(BaseModel):
 class PlanRequest(BaseModel):
     service_note: str
     use_llm: bool = True
+    model: str | None = None  # deployment name; None = AOAI_DEPLOYMENT
 
 
 class RunRequest(BaseModel):

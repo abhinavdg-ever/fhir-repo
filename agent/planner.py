@@ -19,12 +19,12 @@ from datetime import date, timedelta
 from agent.doc_types import (ALL_RECORDS_PHRASES, DATE_WINDOW_PURPOSES, DOCUMENT_CODES,
                              FALLBACK_PHRASES, FALLBACK_STRATEGIES, MEASURES, MODES, PURPOSES,
                              RULES, TARGET_KINDS, TARGET_RULES, doc_label, obs_label)
+from agent.redact import RedactionError, redact
 from common.models import (ClinicalIntent, ClinicalTarget, DateWindow, Plan, PlanItem,
                            ResourceGroup)
 
 
-class LlmError(Exception):
-    """Azure OpenAI is not configured or the call failed."""
+from agent.llm import LlmError, chat_json, get_model  # noqa: E402  (LlmError: not configured or the call failed)
 
 
 # Words that let the job envelope run to today instead of stopping at the last year named.
@@ -305,34 +305,15 @@ def llm_configured() -> bool:
     return bool(_env("AOAI_ENDPOINT") and _env("AOAI_DEPLOYMENT"))
 
 
-def llm_settings() -> dict:
+def llm_settings(model: str | None = None) -> dict:
     """The knobs you can change in .env to try different models or behaviour."""
     temperature = _env("AOAI_TEMPERATURE", "0")
     return {
-        "deployment": _env("AOAI_DEPLOYMENT"),
-        "apiVersion": _env("AOAI_API_VERSION", "2024-10-21"),
+        "deployment": model or _env("AOAI_DEPLOYMENT"),
+        "apiVersion": "v1",
         "temperature": float(temperature) if temperature else None,
         "timeout": float(_env("AOAI_TIMEOUT", "30") or 30),
     }
-
-
-def _client():
-    from openai import AzureOpenAI
-
-    s = llm_settings()
-    common = dict(azure_endpoint=_env("AOAI_ENDPOINT"), api_version=s["apiVersion"],
-                  timeout=s["timeout"], max_retries=1)
-    key = _env("AOAI_API_KEY")
-    if key:
-        return AzureOpenAI(api_key=key, **common)
-    # No key: use Entra ID (az login / managed identity) if azure-identity is installed.
-    try:
-        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-    except ImportError as exc:
-        raise LlmError("AOAI_API_KEY is empty and azure-identity is not installed") from exc
-    token = get_bearer_token_provider(DefaultAzureCredential(),
-                                      "https://cognitiveservices.azure.com/.default")
-    return AzureOpenAI(azure_ad_token_provider=token, **common)
 
 
 SYSTEM_PROMPT = """You turn a health plan's chart-chase "service note" into a clinical retrieval intent for a FHIR (Cerner) record pull.
@@ -367,8 +348,12 @@ def _allowed_purposes() -> str:
 
 
 def build_messages(note: str, today: date | None = None) -> list[dict]:
-    """The exact chat messages sent to Azure OpenAI for a service note."""
+    """The exact chat messages sent to Azure OpenAI for a service note (PII/PHI redacted first)."""
     today = today or date.today()
+    try:
+        note = redact(note)
+    except RedactionError as exc:
+        raise LlmError(str(exc)) from exc
     return [
         {"role": "system", "content": SYSTEM_PROMPT + "\n" + _allowed_purposes()},
         {"role": "user", "content": f"Today is {today.isoformat()}.\nService note:\n{note}"},
@@ -381,35 +366,18 @@ def validate_llm_json(raw: dict, note: str, today: date | None = None) -> Plan:
     return plan_from_intent(intent, "azure-openai", remarks=remarks, today=today)
 
 
-def llm_plan(note: str, today: date | None = None) -> Plan:
+def llm_plan(note: str, today: date | None = None, model: str | None = None) -> Plan:
     if not llm_configured():
         raise LlmError("Azure OpenAI is not configured: set AOAI_ENDPOINT and AOAI_DEPLOYMENT in .env")
     today = today or date.today()
-    s = llm_settings()
-    request = dict(
-        model=s["deployment"],  # Azure: the deployment name
-        response_format={"type": "json_object"},
-        messages=build_messages(note, today),
-    )
-    if s["temperature"] is not None:
-        request["temperature"] = s["temperature"]
-    try:
-        client = _client()
-        try:
-            resp = client.chat.completions.create(**request)
-        except Exception as exc:
-            # gpt-5 / o-series deployments reject a temperature other than the default.
-            if "temperature" not in str(exc).lower() or "temperature" not in request:
-                raise
-            request.pop("temperature")
-            resp = client.chat.completions.create(**request)
-        raw = json.loads(resp.choices[0].message.content or "{}")
-    except LlmError:
-        raise
-    except Exception as exc:
-        raise LlmError(f"Azure OpenAI call failed ({type(exc).__name__}): {exc}") from exc
-    return validate_llm_json(raw, note, today)
+    s = llm_settings(model)
+    m = get_model(s["deployment"])
+    raw, usage = chat_json(m, build_messages(note, today), s["temperature"], s["timeout"])
+    plan = validate_llm_json(raw, note, today)
+    plan.model = m.deployment
+    plan.usage = usage
+    return plan
 
 
-def make_plan(note: str, use_llm: bool = True) -> Plan:
-    return llm_plan(note) if use_llm else rules_plan(note)
+def make_plan(note: str, use_llm: bool = True, model: str | None = None) -> Plan:
+    return llm_plan(note, model=model) if use_llm else rules_plan(note)
