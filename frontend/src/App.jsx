@@ -59,8 +59,16 @@ function packetResult(run) {
 
 const checkedOnly = (items) => items.filter((i) => i.on).map(({ on, ...rest }) => rest);
 
+// EHR sources. Swap the logo files in frontend/public/ehr/ for the official artwork.
+const EHRS = [
+  { id: "cerner", name: "Cerner", logo: "/ehr/cerner.svg", ready: true },
+  { id: "modmed", name: "ModMed", logo: "/ehr/modmed.svg", ready: false },
+];
+
 export default function App() {
   const [health, setHealth] = useState(null);
+  const [ehrId, setEhrId] = useState("cerner");
+  const ehr = EHRS.find((e) => e.id === ehrId);
   const [catalog, setCatalog] = useState({ documents: [], observations: [] });
   const [note, setNote] = useState(SAMPLES.TRC);
   const [useLlm, setUseLlm] = useState(true);
@@ -342,7 +350,7 @@ export default function App() {
           <img className="brand-wordmark" src="/advantmed-wordmark.svg" alt="Advantmed" />
           <div>
             <strong>FHIR Record Retrieval</strong>
-            <p>Service note → LOINC → Cerner records</p>
+            <p>Service note → LOINC → EHR records</p>
           </div>
         </div>
         <div className="topbar-meta">
@@ -363,8 +371,32 @@ export default function App() {
       <main className="page">
         <div className="intro">
           <h1>Chart-chase retrieval</h1>
-          <p>Enter the service note and the member, review the LOINC plan, then pull every matching note from Cerner.</p>
+          <p>Pick the EHR, enter the service note and the member, review the LOINC plan, then pull every matching record.</p>
         </div>
+
+        <div className="ehr-tabs" role="tablist" aria-label="EHR">
+          {EHRS.map((e) => (
+            <button key={e.id} role="tab" aria-selected={e.id === ehrId}
+              className={`ehr-tab ${e.id === ehrId ? "active" : ""} ${e.ready ? "" : "pending"}`}
+              onClick={() => setEhrId(e.id)}>
+              <img src={e.logo} alt="" className="ehr-logo" />
+              <span className="ehr-name">{e.name}</span>
+              {!e.ready && <span className="chip warn ehr-badge">In Development</span>}
+            </button>
+          ))}
+        </div>
+
+        {!ehr.ready ? (
+          <section className="card ehr-soon">
+            <img src={ehr.logo} alt="" className="ehr-logo big" />
+            <div>
+              <h2>{ehr.name} (In Development)</h2>
+              <p className="hint">The {ehr.name} connector is being built. Retrieval works the same way: the service note is
+                translated into a LOINC plan, then the member's records are pulled from {ehr.name}. Use the Cerner tab for now.</p>
+              <button className="ghost" onClick={() => setEhrId("cerner")}>Go to Cerner</button>
+            </div>
+          </section>
+        ) : (<>
 
         {error && <div className="banner error" role="alert">{error}</div>}
         {info && <div className="banner warn">{info}</div>}
@@ -587,6 +619,7 @@ export default function App() {
           {run && <Results key={run.id} run={run} packet={runPacket} onPacket={downloadPacket} onToggleOther={toggleOther}
             onLoadVisits={loadVisits} onLoadVisitDocs={loadVisitDocs} rps={health?.fhirMaxRps} />}
         </section>
+        </>)}
       </main>
 
       <TraceDock trace={trace} open={traceOpen} onToggle={() => setTraceOpen((o) => !o)} fhirBase={health?.fhirBase} />

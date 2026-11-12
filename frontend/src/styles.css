@@ -608,3 +608,20 @@ td.r, th.r { text-align: right; white-space: nowrap; }
 .token-usage { margin-top: 0.5rem; display: grid; gap: 0.4rem; }
 .plan-extras { margin-top: 0.6rem; gap: 0.5rem; }
 .token-usage > .usage-panel { margin-bottom: 0; }
+
+/* EHR tabs */
+.ehr-tabs { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.ehr-tab {
+  display: inline-flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.9rem; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--card); color: inherit;
+  font-weight: 600; cursor: pointer;
+}
+.ehr-tab.active { border-color: var(--brand-700); box-shadow: 0 0 0 2px var(--brand-100); }
+.ehr-tab.pending .ehr-logo { opacity: 0.6; }
+.ehr-logo { width: 28px; height: 28px; border-radius: 7px; display: block; }
+.ehr-logo.big { width: 56px; height: 56px; border-radius: 12px; }
+.ehr-badge { font-size: 0.68rem; }
+.ehr-soon { display: flex; gap: 1rem; align-items: flex-start; }
+.ehr-soon h2 { margin-top: 0; }
+@media (max-width: 640px) { .ehr-tab { flex: 1 1 100%; } }
