@@ -356,7 +356,14 @@ export default function App() {
         <div className="topbar-meta">
           {health && (
             <>
-              <span className="chip mono" title="FHIR base URL">FHIR: {health.fhirBase}</span>
+              {(() => {
+                const base = ehrId === "cerner" ? health.fhirBase : health.modmedFhirBase;
+                return (
+                  <span className={`chip mono ${base ? "" : "warn"}`} title={`${ehr.name} FHIR base URL`}>
+                    {ehr.name} FHIR: {base || "not connected yet"}
+                  </span>
+                );
+              })()}
               <span className={`chip ${health.llm ? "ok" : "warn"}`}>
                 {health.llm
                   ? `Azure AI Foundry · ${useLlm ? (modelInfo ? modelName : health.llmDeployment) : "keyword rules"}`

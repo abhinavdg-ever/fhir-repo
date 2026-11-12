@@ -71,7 +71,8 @@ def client() -> FhirClient:
 def health():
     on = llm_configured()
     s = llm_settings()
-    return {"fhirBase": FHIR_BASE, "llm": on, "llmDeployment": s["deployment"] if on else None,
+    return {"fhirBase": FHIR_BASE, "modmedFhirBase": os.getenv("MODMED_FHIR_BASE", "").split(" #")[0].strip() or None,
+            "llm": on, "llmDeployment": s["deployment"] if on else None,
             "llmTemperature": s["temperature"] if on else None,
             "fhirMaxRps": float(os.getenv("FHIR_MAX_RPS", "3") or 0), "fhirConcurrency": CONCURRENCY,
             "fhirDownloadConcurrency": DOWNLOAD_CONCURRENCY}
