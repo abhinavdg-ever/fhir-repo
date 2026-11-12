@@ -89,8 +89,6 @@ export const api = {
   prompt: (service_note, model) =>
     call("/api/prompt", { method: "POST", body: JSON.stringify({ service_note, use_llm: true, model }) }),
   models: () => call("/api/models"),
-  usage: () => call("/api/usage"),
-  clearUsage: () => call("/api/usage", { method: "DELETE" }),
   encounters: (patient, start, end, ids = []) => {
     const q = new URLSearchParams({ patient });
     if (start) q.set("start", start);

@@ -255,7 +255,7 @@ Demo only: no login, no audit log. For a real tenant add SMART backend-services 
 
 ## Models, tokens and cost
 
-The Request card has a model picker (from `AOAI_MODELS`). Every plan shows the tokens it used, its cost and how long it took; **Usage & cost** shows the totals per model since the server started, and **Compare all models on this note** sends the same (redacted) note to every model side by side.
+The Request card has a model picker (from `AOAI_MODELS`). Every plan shows the tokens it used, its cost and how long it took; **Token & Cost** (next to *Agent output (JSON)*) breaks that call down by input and output tokens. Totals per model since the server started are at `GET /api/usage`.
 
 | Deployment | API | Input / 1M | Output / 1M | Price source |
 |---|---|---|---|---|

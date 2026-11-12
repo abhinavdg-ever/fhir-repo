@@ -66,7 +66,6 @@ export default function App() {
   const [useLlm, setUseLlm] = useState(true);
   const [models, setModels] = useState([]); // deployments to pick from, with prices
   const [model, setModel] = useState("");
-  const [usage, setUsage] = useState(null); // tokens and cost of the model calls so far
   const [planExtra, setPlanExtra] = useState(null); // "json" | "cost": the panel under the plan
   const [plan, setPlan] = useState(null);
   const [name, setName] = useState("");
@@ -101,14 +100,12 @@ export default function App() {
       .catch((e) => setError(`Backend not reachable: ${e.message}`));
     api.catalog().then(setCatalog).catch(() => {});
     api.models().then((m) => { COSTLIEST = m.costliest || COSTLIEST; setModels(byCost(m.models)); setModel(m.default || m.models[0]?.deployment || ""); }).catch(() => {});
-    api.usage().then(setUsage).catch(() => {});
   }, []);
 
   const modelInfo = models.find((m) => m.deployment === model);
   const modelName = modelInfo ? shortName(modelInfo) : model || "Azure OpenAI";
   const askPlan = async () => {
-    try { return await api.plan(note, useLlm, useLlm ? model : undefined); }
-    finally { if (useLlm) api.usage().then(setUsage).catch(() => {}); }
+    return api.plan(note, useLlm, useLlm ? model : undefined);
   };
 
   // Poll the background packet job until it finishes, then save the zip.
@@ -530,7 +527,7 @@ export default function App() {
                 )}
                 {plan.usage && (
                   <button className="ghost small-btn" aria-expanded={planExtra === "cost"}
-                    onClick={() => { setPlanExtra((v) => (v === "cost" ? null : "cost")); api.usage().then(setUsage).catch(() => {}); }}>
+                    onClick={() => setPlanExtra((v) => (v === "cost" ? null : "cost"))}>
                     {planExtra === "cost" ? "Hide Token & Cost" : `Token & Cost · ${fmtUsd(plan.usage.costUsd)}`}
                   </button>
                 )}
@@ -539,8 +536,6 @@ export default function App() {
               {planExtra === "cost" && plan.usage && (
                 <div className="token-usage">
                   <TokenUsage usage={plan.usage} />
-                  <UsagePanel usage={usage} models={models} note={note} busy={!!busy}
-                    onClear={() => api.clearUsage().then(setUsage)} onUsage={setUsage} />
                 </div>
               )}
             </div>
@@ -621,99 +616,6 @@ const stars = (m) => "★".repeat(starCount(m)) + "☆".repeat(5 - starCount(m))
 const lowerThanCostliest = (cost, costliestCost) =>
   costliestCost > 0 ? `${(100 * (1 - cost / costliestCost)).toFixed(1)}% lower than ${COSTLIEST.deployment}` : "";
 const fmtUsd = (n) => `$${(n ?? 0) < 0.01 ? (n ?? 0).toFixed(5) : (n ?? 0).toFixed(4)}`;
-
-function UsagePanel({ usage, models, note, busy, onClear, onUsage }) {
-  const [compare, setCompare] = useState(null); // [{ model, label, plan?, error? }]
-  const [running, setRunning] = useState(false);
-  const runCompare = async () => {
-    setRunning(true);
-    setCompare(models.map((m) => ({ model: m.deployment, label: shortName(m), pending: true })));
-    await Promise.all(models.map(async (m) => {
-      let row;
-      try { row = { plan: await api.plan(note, true, m.deployment) }; }
-      catch (e) { row = { error: e.message }; }
-      setCompare((rows) => rows.map((r) => (r.model === m.deployment ? { ...r, pending: false, ...row } : r)));
-    }));
-    setRunning(false);
-    api.usage().then(onUsage).catch(() => {});
-  };
-  const byModel = usage?.byModel || [];
-  return (
-    <div className="usage-panel">
-      <div className="row wrap">
-        <span className="hint">Tokens and cost of every model call since the server started (USD, Azure Global Standard pay-as-you-go).</span>
-        <button className="ghost small-btn" onClick={runCompare} disabled={running || busy || !note.trim()}
-          title="Send this service note to every model and compare tokens, cost, speed and the plan each returns">
-          {running ? "Comparing…" : "Compare all models on this note"}
-        </button>
-        <button className="ghost small-btn" onClick={onClear} disabled={running}>Clear usage</button>
-      </div>
-      {compare && (
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Model</th><th className="r">Input</th><th className="r">Output</th><th className="r">Cost</th><th className="r">vs o1-pro</th><th className="r">Time</th><th>Measures</th><th>Job window</th><th className="r">Doc codes</th><th>Encounters</th></tr></thead>
-            <tbody>
-              {compare.map((r) => (
-                <tr key={r.model}>
-                  <td>{r.label}</td>
-                  {r.pending ? <td colSpan={9} className="hint">Waiting for the model…</td>
-                    : r.error ? <td colSpan={9} className="error-text">{r.error}</td>
-                    : <>
-                      <td className="r mono">{fmtInt(r.plan.usage?.inputTokens)}</td>
-                      <td className="r mono">{fmtInt(r.plan.usage?.outputTokens)}</td>
-                      <td className="r mono">{fmtUsd(r.plan.usage?.costUsd)}</td>
-                      <td className="r mono">{r.plan.usage?.costliest ? `${(100 * (1 - r.plan.usage.costUsd / r.plan.usage.costliest.costUsd)).toFixed(1)}% lower` : "–"}</td>
-                      <td className="r mono">{((r.plan.usage?.latencyMs || 0) / 1000).toFixed(1)} s</td>
-                      <td>{r.plan.measures.join(", ") || "generic"}</td>
-                      <td className="mono">{toUS(r.plan.start)} – {toUS(r.plan.end)}</td>
-                      <td className="r">{r.plan.documents.length}</td>
-                      <td>{r.plan.encounters.map((e) => e.code.replace(/_/g, " ")).join(", ") || "–"}</td>
-                    </>}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Model</th><th className="r">Calls</th><th className="r">Input tokens</th><th className="r">Output tokens</th><th className="r">Cost</th><th className="r">Price / 1M (in · out)</th><th>Cost rating</th></tr></thead>
-          <tbody>
-            {models.map((m) => {
-              const t = byModel.find((b) => b.model === m.deployment);
-              return (
-                <tr key={m.deployment}>
-                  <td title={m.priceSource}>{shortName(m)}</td>
-                  <td className="r">{t?.calls || 0}</td>
-                  <td className="r mono">{fmtInt(t?.inputTokens)}</td>
-                  <td className="r mono">{fmtInt(t?.outputTokens)}</td>
-                  <td className="r mono">{fmtUsd(t?.costUsd)}</td>
-                  <td className="r mono" title={m.priceSource}>${fmtPrice(m.input)} · ${fmtPrice(m.output)}</td>
-                  <td><span className="stars" title="Cost on a log scale: 5 stars = o1-pro, the costliest model on Azure AI Foundry">{stars(m)}</span></td>
-                </tr>
-              );
-            })}
-            <tr className="total-row">
-              <td><b>Total</b></td>
-              <td className="r">{byModel.reduce((a, b) => a + b.calls, 0)}</td>
-              <td className="r mono">{fmtInt(byModel.reduce((a, b) => a + b.inputTokens, 0))}</td>
-              <td className="r mono">{fmtInt(byModel.reduce((a, b) => a + b.outputTokens, 0))}</td>
-              <td className="r mono"><b>{fmtUsd(usage?.totalCostUsd)}</b></td>
-              <td />
-              <td />
-            </tr>
-            <tr className="muted">
-              <td>{COSTLIEST.deployment} (costliest on Foundry, reference)</td>
-              <td /><td /><td /><td />
-              <td className="r mono">${fmtPrice(COSTLIEST.input)} · ${fmtPrice(COSTLIEST.output)}</td>
-              <td><span className="stars">★★★★★</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
 
 function PromptView({ prompt, onRefresh, stale }) {
   return (
